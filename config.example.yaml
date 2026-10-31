@@ -42,16 +42,42 @@ devices:
 commands:
   ping_seconds: 3          # CIC_COMMANDS_PING_SECONDS
   sms_daily_cap: 50        # CIC_COMMANDS_SMS_DAILY_CAP; billed SMS segments per UTC day, 0 disables
+# LatLng has TWO kinds of key, and each goes in a different place:
+#   * SERVER key  latlng_...     geocoding only; secret, never sent to the browser.
+#                                -> geocode.api_key / CIC_GEOCODE_API_KEY
+#   * public MAPS key pk_latlng_... (or pk_...)  map tiles only; browser-safe by design.
+#                                -> map.latlng_maps_key / CIC_MAP_LATLNG_MAPS_KEY
+# Putting a pk_ key in geocode.api_key does not stop startup: an error is logged and
+# geocoding stays disabled (the API rejects public keys with 403).
+# Quota (free tier, approximate): ~3000 calls/day shared across ALL LatLng calls, of which
+# reverse geocoding is limited to ~300/day. With map.provider "latlng", every tile request
+# also counts against the shared pool; the default openfreemap provider needs no key.
 geocode:
   enabled: true            # CIC_GEOCODE_ENABLED
-  api_key: ""              # CIC_GEOCODE_API_KEY (secret)
+  api_key: ""              # CIC_GEOCODE_API_KEY (secret): LatLng SERVER key, must start with latlng_
   min_move_meters: 150     # CIC_GEOCODE_MIN_MOVE_METERS
   max_age: 24h             # CIC_GEOCODE_MAX_AGE
   daily_cap: 250           # CIC_GEOCODE_DAILY_CAP
   reserve: 20              # CIC_GEOCODE_RESERVE
 map:
   provider: "openfreemap"  # CIC_MAP_PROVIDER: openfreemap | latlng
+  # Public LatLng maps key (must start with pk_). Browser-safe, but it is only used if you put
+  # it into the style URLs yourself: LatLng publishes TileJSON + vector tiles, not a ready
+  # MapLibre style, so provider "latlng" REQUIRES both style_light and style_dark.
   latlng_maps_key: ""      # CIC_MAP_LATLNG_MAPS_KEY
+  # Optional MapLibre style URL overrides (https, host required, no credentials or fragment,
+  # max 512 chars). Defaults for openfreemap:
+  #   light https://tiles.openfreemap.org/styles/positron
+  #   dark  https://tiles.openfreemap.org/styles/dark
+  style_light: ""          # CIC_MAP_STYLE_LIGHT
+  style_dark: ""           # CIC_MAP_STYLE_DARK
+  # Content-Security-Policy: img-src, connect-src and font-src allow only 'self' plus the
+  # origins derived from the provider, the two style URLs above and extra_origins below.
+  # A style JSON usually references its own tile, sprite and glyph hosts and the browser
+  # enforces the CSP on them, so a custom style must be served from, and reference only,
+  # an allowed origin; list any other host here as a bare https origin (no path), e.g.
+  # ["https://tiles.example.com", "https://cdn.example.com:8443"].
+  extra_origins: []        # CIC_MAP_EXTRA_ORIGINS (comma separated)
 auth:
   oidc:
     enabled: false                          # CIC_AUTH_OIDC_ENABLED

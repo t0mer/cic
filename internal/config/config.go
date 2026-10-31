@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -85,10 +87,16 @@ type GeocodeConfig struct {
 	Reserve       int           `mapstructure:"reserve"`
 }
 
-// MapConfig selects the map tile provider.
+// MapConfig selects the map tile provider and style.
 type MapConfig struct {
 	Provider      string `mapstructure:"provider"`
 	LatlngMapsKey string `mapstructure:"latlng_maps_key"`
+	// StyleLight and StyleDark optionally override the provider's MapLibre style URLs.
+	StyleLight string `mapstructure:"style_light"`
+	StyleDark  string `mapstructure:"style_dark"`
+	// ExtraOrigins are additional https origins (scheme://host[:port]) allowed by the CSP for
+	// map images, requests and fonts; needed when a custom style references other hosts.
+	ExtraOrigins []string `mapstructure:"extra_origins"`
 }
 
 // AuthConfig configures authentication.
@@ -159,6 +167,9 @@ func newViper() *viper.Viper {
 		"geocode.reserve":                  20,
 		"map.provider":                     "openfreemap",
 		"map.latlng_maps_key":              "",
+		"map.style_light":                  "",
+		"map.style_dark":                   "",
+		"map.extra_origins":                []string{},
 		"auth.oidc.enabled":                false,
 		"auth.oidc.issuer":                 "https://accounts.google.com",
 		"auth.oidc.client_id":              "",
@@ -270,9 +281,7 @@ func (c *Config) Validate() error {
 			errs = append(errs, fmt.Errorf("geocode.reserve %d must not exceed geocode.daily_cap %d", g.Reserve, g.DailyCap))
 		}
 	}
-	if c.Map.Provider == "latlng" && c.Map.LatlngMapsKey == "" {
-		errs = append(errs, errors.New("map.latlng_maps_key is required when map.provider is latlng"))
-	}
+	errs = append(errs, c.validateMap()...)
 	if o := c.Auth.OIDC; o.Enabled {
 		for name, val := range map[string]string{"issuer": o.Issuer, "client_id": o.ClientID, "client_secret": o.ClientSecret} {
 			if val == "" {
@@ -345,4 +354,179 @@ func (c *Config) String() string {
 // LogValue implements slog.LogValuer with secrets redacted.
 func (c *Config) LogValue() slog.Value {
 	return slog.StringValue(c.String())
+}
+
+// Built-in map style URLs for the openfreemap provider (verified to exist).
+const (
+	openFreeMapLight = "https://tiles.openfreemap.org/styles/positron"
+	openFreeMapDark  = "https://tiles.openfreemap.org/styles/dark"
+)
+
+// providerOrigins are the origins the provider's own assets are served from: the default
+// OpenFreeMap styles reference only tiles.openfreemap.org (style, TileJSON, tiles, sprite,
+// glyphs, raster); the LatLng tile server is tiles.latlng.work.
+var providerOrigins = map[string][]string{
+	"openfreemap": {"https://tiles.openfreemap.org"},
+	"latlng":      {"https://tiles.latlng.work"},
+}
+
+var (
+	hostRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
+	portRe = regexp.MustCompile(`^[0-9]{1,5}$`)
+)
+
+const maxStyleURL = 512
+
+// originOf returns scheme://host[:port] of an https URL, or an error. Only ASCII hostnames
+// (no IP literals, wildcards, IDN) and plain numeric ports are accepted so the result is
+// safe to splice into a CSP header.
+func originOf(u *url.URL) (string, error) {
+	if u.Scheme != "https" {
+		return "", errors.New("must use https")
+	}
+	if u.User != nil {
+		return "", errors.New("must not contain credentials")
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" || !hostRe.MatchString(host) || len(host) > 253 {
+		return "", errors.New("host must be an ASCII hostname")
+	}
+	origin := "https://" + host
+	if p := u.Port(); p != "" {
+		n, err := strconv.Atoi(p)
+		if !portRe.MatchString(p) || err != nil || n < 1 || n > 65535 {
+			return "", errors.New("invalid port")
+		}
+		origin += ":" + strconv.Itoa(n)
+	} else if strings.HasSuffix(u.Host, ":") {
+		return "", errors.New("invalid port")
+	}
+	return origin, nil
+}
+
+func parseStyleURL(raw string) (*url.URL, error) {
+	if len(raw) > maxStyleURL {
+		return nil, fmt.Errorf("longer than %d characters", maxStyleURL)
+	}
+	if strings.TrimSpace(raw) != raw || strings.ContainsAny(raw, " \t\r\n;,'\"") {
+		return nil, errors.New("contains whitespace or illegal characters")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, errors.New("not a valid URL")
+	}
+	if u.Fragment != "" || strings.Contains(raw, "#") {
+		return nil, errors.New("must not contain a fragment")
+	}
+	if _, err := originOf(u); err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
+func (c *Config) validateMap() []error {
+	var errs []error
+	m := c.Map
+	for name, val := range map[string]string{"map.style_light": m.StyleLight, "map.style_dark": m.StyleDark} {
+		if val == "" {
+			continue
+		}
+		if _, err := parseStyleURL(val); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+		}
+	}
+	for _, o := range m.ExtraOrigins {
+		if _, err := parseExtraOrigin(o); err != nil {
+			errs = append(errs, fmt.Errorf("map.extra_origins entry %q: %w", o, err))
+		}
+	}
+	if m.LatlngMapsKey != "" && !strings.HasPrefix(m.LatlngMapsKey, "pk_") {
+		errs = append(errs, errors.New("map.latlng_maps_key must be a public maps key starting with pk_"))
+	}
+	// LatLng publishes no ready-made MapLibre style URL (only TileJSON + vector tiles), so the
+	// styles cannot be derived: both must be given, and carry the maps key themselves.
+	if m.Provider == "latlng" && (m.StyleLight == "" || m.StyleDark == "") {
+		errs = append(errs, errors.New("map.style_light and map.style_dark are both required when map.provider is latlng"))
+	}
+	return errs
+}
+
+func parseExtraOrigin(raw string) (string, error) {
+	u, err := parseStyleURL(raw)
+	if err != nil {
+		return "", err
+	}
+	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery {
+		return "", errors.New("must be a bare origin (scheme://host[:port])")
+	}
+	return originOf(u)
+}
+
+// EffectiveStyles returns the light and dark MapLibre style URLs: the configured overrides,
+// else the provider defaults (empty for latlng, which requires explicit URLs).
+func (c *Config) EffectiveStyles() (light, dark string) {
+	light, dark = c.Map.StyleLight, c.Map.StyleDark
+	if c.Map.Provider == "openfreemap" || c.Map.Provider == "" {
+		if light == "" {
+			light = openFreeMapLight
+		}
+		if dark == "" {
+			dark = openFreeMapDark
+		}
+	}
+	return light, dark
+}
+
+// MapOrigins returns the deduplicated https origins the browser may load map assets from:
+// the provider's built-in origins, the origins of the two effective style URLs and
+// map.extra_origins. Invalid entries are skipped (Validate rejects them at startup).
+func (c *Config) MapOrigins() []string {
+	provider := c.Map.Provider
+	if provider == "" {
+		provider = "openfreemap"
+	}
+	light, dark := c.EffectiveStyles()
+	var out []string
+	seen := map[string]bool{}
+	add := func(o string) {
+		if o != "" && !seen[o] {
+			seen[o] = true
+			out = append(out, o)
+		}
+	}
+	for _, o := range providerOrigins[provider] {
+		add(o)
+	}
+	for _, s := range []string{light, dark} {
+		if u, err := parseStyleURL(s); err == nil {
+			o, _ := originOf(u)
+			add(o)
+		}
+	}
+	for _, e := range c.Map.ExtraOrigins {
+		if o, err := parseExtraOrigin(e); err == nil {
+			add(o)
+		}
+	}
+	return out
+}
+
+// Attribution is the map attribution text for the provider.
+func (c *Config) Attribution() string {
+	if c.Map.Provider == "latlng" {
+		return "© OpenStreetMap contributors · LatLng"
+	}
+	return "© OpenStreetMap contributors · OpenFreeMap"
+}
+
+// GeocodeUsable reports whether reverse geocoding can run: it is enabled and a LatLng
+// server key (latlng_…) is set. A public maps key (pk_…) is never usable for geocoding.
+func (c *Config) GeocodeUsable() bool {
+	k := c.Geocode.APIKey
+	return c.Geocode.Enabled && k != "" && !strings.HasPrefix(k, "pk_") && strings.HasPrefix(k, "latlng_")
+}
+
+// GeocodeKeyIsPublic reports whether geocode.api_key holds a public maps key by mistake.
+func (c *Config) GeocodeKeyIsPublic() bool {
+	return strings.HasPrefix(c.Geocode.APIKey, "pk_")
 }

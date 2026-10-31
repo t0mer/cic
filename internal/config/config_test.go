@@ -122,7 +122,7 @@ func TestValidateFailures(t *testing.T) {
 		{"geocode cap negative", func(c *Config) { c.Geocode.DailyCap = -1; c.Geocode.Reserve = -2 }, "geocode.daily_cap"},
 		{"geocode reserve negative", func(c *Config) { c.Geocode.Reserve = -1 }, "geocode.reserve"},
 		{"reserve above cap", func(c *Config) { c.Geocode.Reserve = c.Geocode.DailyCap + 1 }, "must not exceed"},
-		{"latlng without key", func(c *Config) { c.Map.Provider = "latlng" }, "latlng_maps_key"},
+		{"latlng without styles", func(c *Config) { c.Map.Provider = "latlng" }, "map.style_light and map.style_dark"},
 		{"oidc missing client_id", func(c *Config) {
 			c.Auth.OIDC = OIDCConfig{Enabled: true, Issuer: "i", ClientSecret: "s", AllowedEmails: []string{"a@b"}}
 		}, "auth.oidc.client_id"},
