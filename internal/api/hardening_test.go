@@ -129,7 +129,10 @@ func TestMethodNotAllowedAllowHeaderAndAuthOrder(t *testing.T) {
 		{"GET", "/api/devices/dradis/a/refresh-status", "POST"},
 		{"DELETE", "/api/devices/dradis/a/refresh-location", "POST"},
 		{"POST", "/api/devices", "GET"},
-		{"POST", "/api/devices/dradis/a", "GET"},
+		{"POST", "/api/devices/dradis/a", "DELETE, GET, PATCH"},
+		{"GET", "/api/users/1", "PATCH"},
+		{"GET", "/api/users/1/reset-password", "POST"},
+		{"DELETE", "/api/users", "GET, POST"},
 		{"POST", "/api/activity", "GET"},
 		{"POST", "/api/events", "GET"},
 	}

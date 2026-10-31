@@ -29,6 +29,11 @@ func (fakeDevices) Get(context.Context, string) (devices.Device, error) {
 	return devices.Device{}, store.ErrNotFound
 }
 func (fakeDevices) OnChange(func(devices.Device)) {}
+func (fakeDevices) OnRemove(func(devices.Device)) {}
+func (fakeDevices) UpdateProfile(context.Context, string, devices.ProfilePatch) (devices.Device, bool, error) {
+	return devices.Device{}, false, store.ErrNotFound
+}
+func (fakeDevices) Delete(context.Context, string) error { return store.ErrNotFound }
 
 func TestMain(m *testing.M) {
 	auth.UseFastHashingForTests()

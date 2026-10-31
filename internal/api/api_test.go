@@ -27,13 +27,73 @@ import (
 )
 
 type fakeStore struct {
-	mu    sync.Mutex
-	devs  []devices.Device
-	hooks []func(devices.Device)
+	mu          sync.Mutex
+	devs        []devices.Device
+	hooks       []func(devices.Device)
+	removeHooks []func(devices.Device)
 }
 
-func (f *fakeStore) List(context.Context) ([]devices.Device, error) { return f.devs, nil }
+func (f *fakeStore) OnRemove(fn func(devices.Device)) {
+	f.mu.Lock()
+	f.removeHooks = append(f.removeHooks, fn)
+	f.mu.Unlock()
+}
+
+func (f *fakeStore) UpdateProfile(_ context.Context, key string, p devices.ProfilePatch) (devices.Device, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.devs {
+		if f.devs[i].Key != key {
+			continue
+		}
+		was := f.devs[i].Hidden
+		if p.FullName != nil {
+			f.devs[i].FullName = *p.FullName
+			if *p.FullName == "" {
+				f.devs[i].FullName = f.devs[i].Device
+			}
+		}
+		if p.Color != nil {
+			f.devs[i].Color = *p.Color
+		}
+		if p.Hidden != nil {
+			f.devs[i].Hidden = *p.Hidden
+		}
+		return f.devs[i], was, nil
+	}
+	return devices.Device{}, false, store.ErrNotFound
+}
+
+func (f *fakeStore) Delete(_ context.Context, key string) error {
+	f.mu.Lock()
+	var gone *devices.Device
+	for i := range f.devs {
+		if f.devs[i].Key == key {
+			d := f.devs[i]
+			gone = &d
+			f.devs = append(f.devs[:i], f.devs[i+1:]...)
+			break
+		}
+	}
+	hooks := append([]func(devices.Device){}, f.removeHooks...)
+	f.mu.Unlock()
+	if gone == nil {
+		return store.ErrNotFound
+	}
+	for _, h := range hooks {
+		h(*gone)
+	}
+	return nil
+}
+
+func (f *fakeStore) List(context.Context) ([]devices.Device, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]devices.Device(nil), f.devs...), nil
+}
 func (f *fakeStore) Get(_ context.Context, key string) (devices.Device, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	for _, d := range f.devs {
 		if d.Key == key {
 			return d, nil
@@ -368,7 +428,8 @@ func TestSpecParity(t *testing.T) {
 	}
 	for _, k := range []string{"post /api/auth/login", "post /api/auth/logout", "get /api/auth/me", "post /api/auth/change-password", "get /api/openapi.yaml",
 		"post /api/devices/{prefix}/{device}/ping", "post /api/devices/{prefix}/{device}/ping/stop", "post /api/devices/{prefix}/{device}/notify",
-		"post /api/devices/{prefix}/{device}/sms", "post /api/devices/{prefix}/{device}/refresh-status", "post /api/devices/{prefix}/{device}/refresh-location", "get /api/activity", "get /api/ui-config"} {
+		"post /api/devices/{prefix}/{device}/sms", "post /api/devices/{prefix}/{device}/refresh-status", "post /api/devices/{prefix}/{device}/refresh-location", "get /api/activity", "get /api/ui-config",
+		"patch /api/devices/{prefix}/{device}", "delete /api/devices/{prefix}/{device}", "get /api/users", "post /api/users", "patch /api/users/{id}", "post /api/users/{id}/reset-password"} {
 		if !specRoutes[k] {
 			t.Errorf("spec lacks %s", k)
 		}

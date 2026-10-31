@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -39,6 +40,12 @@ type DeviceStore interface {
 	List(ctx context.Context) ([]devices.Device, error)
 	Get(ctx context.Context, key string) (devices.Device, error)
 	OnChange(fn func(devices.Device))
+	// UpdateProfile applies a partial profile update and returns the device and the hidden flag
+	// it had before the update (store.ErrNotFound if unknown).
+	UpdateProfile(ctx context.Context, key string, p devices.ProfilePatch) (devices.Device, bool, error)
+	// Delete removes a device (store.ErrNotFound if unknown) and calls the OnRemove hooks.
+	Delete(ctx context.Context, key string) error
+	OnRemove(fn func(devices.Device))
 }
 
 // BrokerState reports the MQTT connection state.
@@ -94,7 +101,7 @@ func New(d Deps) http.Handler {
 	}
 	r := chi.NewRouter()
 	r.Use(limitBody)
-	s := &server{Deps: d}
+	s := &server{Deps: d, writes: newWriteLimiter(time.Now)}
 	r.Mount("/auth", d.Auth.Routes())
 	// Everything else needs a session. Handlers that mutate state or touch settings
 	// add auth.RequireRole(auth.RoleAdmin) in their own group.
@@ -108,6 +115,7 @@ func New(d Deps) http.Handler {
 		r.Group(func(r chi.Router) {
 			r.Use(auth.RequireRole(auth.RoleAdmin))
 			s.cmdRoutes(r)
+			s.settingsRoutes(r)
 		})
 		r.Get("/openapi.yaml", func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/yaml")
@@ -209,7 +217,14 @@ func limitBody(next http.Handler) http.Handler {
 	})
 }
 
-type server struct{ Deps }
+type server struct {
+	Deps
+	writes *writeLimiter
+	// devLocks serialises "write the row, then publish" per device key.
+	devLocks keyedMutex
+	// warnedTypes remembers unrecognised event payload types already logged by viewerView.
+	warnedTypes sync.Map
+}
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -229,7 +244,9 @@ func (s *server) listDevices(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	incl := r.URL.Query().Get("include_hidden") == "1"
+	// Hidden devices are for administrators only; a viewer's include_hidden is ignored.
+	u, _ := auth.UserFrom(r.Context())
+	incl := r.URL.Query().Get("include_hidden") == "1" && u.Role == auth.RoleAdmin
 	out := make([]devices.Device, 0, len(all))
 	for _, d := range all {
 		if d.Hidden && !incl {
@@ -260,6 +277,10 @@ func (s *server) getDevice(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.log().Error("reading device", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if u, _ := auth.UserFrom(r.Context()); d.Hidden && u.Role != auth.RoleAdmin {
+		writeError(w, http.StatusNotFound, "device not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, d)
@@ -328,6 +349,9 @@ func (s *server) uiConfig(w http.ResponseWriter, _ *http.Request) {
 func StartFeeds(ctx context.Context, d Deps) {
 	d.Devices.OnChange(func(dev devices.Device) {
 		d.Hub.Publish(events.TypeDeviceUpdated, dev)
+	})
+	d.Devices.OnRemove(func(dev devices.Device) {
+		d.Hub.Publish(events.TypeDeviceRemoved, removedEvent{Key: dev.Key, hidden: dev.Hidden})
 	})
 	if d.Broker == nil {
 		return

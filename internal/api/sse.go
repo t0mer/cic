@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/t0mer/cic/internal/auth"
+	"github.com/t0mer/cic/internal/devices"
 	"github.com/t0mer/cic/internal/events"
 )
 
@@ -97,6 +98,14 @@ func (s *server) sse(w http.ResponseWriter, r *http.Request) {
 			if ev.Type == events.TypeCommandResult && !admin {
 				continue
 			}
+			if !admin {
+				// Hidden devices are never shown to viewers; a device that has just become
+				// hidden is announced to them as removed.
+				var drop bool
+				if ev, drop = s.viewerView(ev); drop {
+					continue
+				}
+			}
 			if err := writeEvent(w, ev.ID, ev.Type, ev.Data); err != nil {
 				return
 			}
@@ -124,4 +133,32 @@ func writeEvent(w http.ResponseWriter, id uint64, typ string, data any) error {
 	}
 	_, err = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", typ, b)
 	return err
+}
+
+// viewerView adapts a device event for a non-admin stream; drop means send nothing. A device
+// event whose payload type is not recognised is dropped (fail closed) and reported once per
+// type, by type name only.
+func (s *server) viewerView(ev events.Event) (events.Event, bool) {
+	switch d := ev.Data.(type) {
+	case devices.Device:
+		return ev, d.Hidden
+	case deviceUpdate:
+		if d.Hidden {
+			if d.becameHidden {
+				return events.Event{ID: ev.ID, Type: events.TypeDeviceRemoved, Data: removedEvent{Key: d.Key}}, false
+			}
+			return ev, true
+		}
+		return ev, false
+	case removedEvent:
+		return ev, d.hidden
+	}
+	if ev.Type == events.TypeDeviceUpdated || ev.Type == events.TypeDeviceRemoved {
+		name := fmt.Sprintf("%T", ev.Data)
+		if _, seen := s.warnedTypes.LoadOrStore(name, true); !seen {
+			s.log().Warn("dropping device event with unrecognised payload type for viewers", "type", name)
+		}
+		return ev, true
+	}
+	return ev, false
 }

@@ -107,7 +107,7 @@ paths:
       parameters:
         - name: include_hidden
           in: query
-          description: Set to 1 to include hidden devices.
+          description: Set to 1 to include hidden devices. Administrators only; for a viewer the parameter is ignored and hidden devices are never returned.
           schema: { type: string, enum: ["1"] }
       responses:
         "200":
@@ -123,6 +123,7 @@ paths:
   /api/devices/{prefix}/{device}:
     get:
       summary: Get one device
+      description: A hidden device is answered 404 to viewers.
       parameters:
         - { name: prefix, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" } }
         - { name: device, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" } }
@@ -137,6 +138,56 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/Error" }
         "500": { $ref: "#/components/responses/Error" }
+    patch:
+      summary: Edit a device (admin)
+      description: >
+        Partial update: omitted fields stay unchanged. `full_name` is trimmed with runs of spaces collapsed, at most 80 characters,
+        without control, format or line/paragraph separator characters and with at least one visible
+        character (blank fillers such as U+3164 are refused); an empty value resets it to the device segment.
+        `color` is empty (reset) or `#rrggbb`. Publishes `device.updated` and writes a `device_update`
+        audit row listing only the changed field names. At most 30 settings writes per minute per admin.
+      parameters:
+        - { name: prefix, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" } }
+        - { name: device, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" } }
+        - { $ref: "#/components/parameters/CSRF" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DevicePatch" }
+      responses:
+        "200":
+          description: The updated device.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Device" }
+        "400": { $ref: "#/components/responses/SettingsError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/SettingsError" }
+        "413": { $ref: "#/components/responses/SettingsError" }
+        "415": { $ref: "#/components/responses/SettingsError" }
+        "429": { $ref: "#/components/responses/SettingsRateLimited" }
+        "500": { $ref: "#/components/responses/SettingsError" }
+        "503": { $ref: "#/components/responses/SettingsError" }
+    delete:
+      summary: Remove a device (admin)
+      description: >
+        Deletes the row; it reappears if the phone publishes again. Publishes `device.removed`
+        and writes a `device_delete` audit row.
+      parameters:
+        - { name: prefix, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" } }
+        - { name: device, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" } }
+        - { $ref: "#/components/parameters/CSRF" }
+      responses:
+        "204": { description: Removed. }
+        "400": { $ref: "#/components/responses/SettingsError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/SettingsError" }
+        "429": { $ref: "#/components/responses/SettingsRateLimited" }
+        "500": { $ref: "#/components/responses/SettingsError" }
+        "503": { $ref: "#/components/responses/SettingsError" }
   /api/devices/{prefix}/{device}/ping:
     post:
       summary: Start a ping (find my phone)
@@ -302,6 +353,108 @@ paths:
         "429": { $ref: "#/components/responses/CommandRateLimited" }
         "503": { $ref: "#/components/responses/CommandError" }
         "504": { $ref: "#/components/responses/CommandOutcomeUnknown" }
+  /api/users:
+    get:
+      summary: List users (admin)
+      responses:
+        "200":
+          description: All accounts sorted by username. Never carries password material.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ManagedUser" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/SettingsError" }
+    post:
+      summary: Create a user (admin)
+      description: >
+        Username policy as `cic user add`: 3-64 of A-Z a-z 0-9 . _ -, unique case-insensitively.
+        Without `password` the server generates one and returns it once as `initial_password`;
+        a supplied password must satisfy the policy (min 12 characters, not equal to the username,
+        not a single repeated character). Either way the user must change the password at first login.
+        Audit: `user_create`. The password is never audited, logged or published. The response carries
+        `Cache-Control: no-store` and `Pragma: no-cache`. Password hashing shares a small process-wide budget with
+        logins; when it stays exhausted for 5 s the answer is 503 `busy` (audit `rejected:busy`).
+      parameters:
+        - { $ref: "#/components/parameters/CSRF" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateUserRequest" }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreateUserResponse" }
+        "400": { $ref: "#/components/responses/SettingsError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/SettingsError" }
+        "413": { $ref: "#/components/responses/SettingsError" }
+        "415": { $ref: "#/components/responses/SettingsError" }
+        "429": { $ref: "#/components/responses/SettingsRateLimited" }
+        "500": { $ref: "#/components/responses/SettingsError" }
+        "503": { $ref: "#/components/responses/SettingsError" }
+  /api/users/{id}:
+    patch:
+      summary: Change a user's role or disabled flag (admin)
+      description: >
+        Partial update. An admin cannot disable or demote themselves, and the last active admin can
+        never be disabled or demoted (checked atomically): both answer 409 `forbidden_change`.
+        Disabling or changing the role ends all of the user's sessions and event streams.
+        Audit: `user_update` with the changed field names only.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, minimum: 1 } }
+        - { $ref: "#/components/parameters/CSRF" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UserPatch" }
+      responses:
+        "200":
+          description: The updated user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ManagedUser" }
+        "400": { $ref: "#/components/responses/SettingsError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/SettingsError" }
+        "409": { $ref: "#/components/responses/SettingsError" }
+        "413": { $ref: "#/components/responses/SettingsError" }
+        "415": { $ref: "#/components/responses/SettingsError" }
+        "429": { $ref: "#/components/responses/SettingsRateLimited" }
+        "500": { $ref: "#/components/responses/SettingsError" }
+        "503": { $ref: "#/components/responses/SettingsError" }
+  /api/users/{id}/reset-password:
+    post:
+      summary: Reset a user's password (admin)
+      description: >
+        Generates a new password, returns it once, sets `must_change_password` and ends all of the
+        user's sessions and event streams. No request body. Audit: `user_reset_password`. The response carries
+        `Cache-Control: no-store` and `Pragma: no-cache`; a hashing budget that stays exhausted for 5 s gives
+        503 `busy` (audit `rejected:busy`).
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, minimum: 1 } }
+        - { $ref: "#/components/parameters/CSRF" }
+      responses:
+        "200":
+          description: The one-time password.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResetPasswordResponse" }
+        "400": { $ref: "#/components/responses/SettingsError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/SettingsError" }
+        "429": { $ref: "#/components/responses/SettingsRateLimited" }
+        "500": { $ref: "#/components/responses/SettingsError" }
+        "503": { $ref: "#/components/responses/SettingsError" }
   /api/activity:
     get:
       summary: Command audit log
@@ -362,7 +515,8 @@ paths:
         `device.removed` ({key}), `broker.state` (Broker) and `command.result` (CommandResult: the
         outcome of an SMS, published when the phone reports it or, failing that, 60 s after sending as
         `no_confirmation`; it never carries the raw phone number or the text). `command.result` is sent to administrator sessions
-        only; viewers never receive it. A `: ping` comment is sent
+        only; viewers never receive it. Hidden devices are never sent to viewers: when a device becomes hidden
+        a viewer stream receives `device.removed` for it instead of `device.updated`. A `: ping` comment is sent
         every 25 seconds. Last-Event-ID is ignored; refetch /api/devices after reconnecting.
         The stream ends immediately when its session ends (logout, password change, disabling, eviction).
         A user may hold at most 5 streams; the 6th is refused with 429.
@@ -453,6 +607,19 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/CommandError" }
+    SettingsError:
+      description: "Settings error; `code` says why: `invalid` 400/413/415, `unknown_device` or `not_found` 404, `user_exists` or `forbidden_change` 409, `unavailable` 500/503 (nothing was changed), `busy` 503 (password hashing capacity stayed exhausted for 5 s; retry later, nothing was changed)."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/SettingsError" }
+    SettingsRateLimited:
+      description: "`rate_limited`: more than 30 settings writes in a minute by this admin."
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/SettingsError" }
     Error:
       description: Error.
       content:
@@ -492,6 +659,55 @@ components:
       properties:
         current_password: { type: string }
         new_password: { type: string, minLength: 12 }
+    SettingsError:
+      type: object
+      required: [error, code]
+      properties:
+        error: { type: string }
+        code: { type: string, enum: [invalid, unknown_device, not_found, user_exists, forbidden_change, rate_limited, unavailable, busy] }
+    DevicePatch:
+      type: object
+      additionalProperties: false
+      properties:
+        full_name: { type: string, description: "Trimmed; at most 80 characters; no control/format characters; empty resets to the device segment" }
+        color: { type: string, pattern: "^(#[0-9a-fA-F]{6})?$", description: "Empty resets" }
+        hidden: { type: boolean }
+    ManagedUser:
+      type: object
+      required: [id, username, role, disabled, must_change_password, created_at, last_login]
+      properties:
+        id: { type: integer, format: int64 }
+        username: { type: string }
+        role: { type: string, enum: [admin, viewer] }
+        disabled: { type: boolean }
+        must_change_password: { type: boolean }
+        created_at: { type: string, format: date-time }
+        last_login: { type: string, format: date-time, nullable: true }
+    CreateUserRequest:
+      type: object
+      additionalProperties: false
+      required: [username, role]
+      properties:
+        username: { type: string, pattern: "^[A-Za-z0-9._-]{3,64}$" }
+        role: { type: string, enum: [admin, viewer] }
+        password: { type: string, minLength: 12, description: "Optional; generated when omitted" }
+    CreateUserResponse:
+      type: object
+      required: [user, initial_password]
+      properties:
+        user: { $ref: "#/components/schemas/ManagedUser" }
+        initial_password: { type: string, nullable: true, description: "Shown once, only when the server generated the password; null when one was supplied" }
+    UserPatch:
+      type: object
+      additionalProperties: false
+      properties:
+        role: { type: string, enum: [admin, viewer] }
+        disabled: { type: boolean }
+    ResetPasswordResponse:
+      type: object
+      required: [initial_password]
+      properties:
+        initial_password: { type: string, description: "Shown once" }
     Error:
       type: object
       required: [error]
