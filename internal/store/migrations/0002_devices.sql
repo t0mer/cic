@@ -1,0 +1,23 @@
+CREATE TABLE devices (
+    key            TEXT PRIMARY KEY,
+    prefix         TEXT NOT NULL,
+    device         TEXT NOT NULL,
+    full_name      TEXT NOT NULL DEFAULT '',
+    color          TEXT NOT NULL DEFAULT '',
+    hidden         INTEGER NOT NULL DEFAULT 0,
+    status         INTEGER,
+    version        TEXT,
+    battery_level  INTEGER,
+    charging       INTEGER,
+    charge_type    TEXT,
+    wifi_connected INTEGER,
+    ssid           TEXT,
+    latitude       REAL,
+    longitude      REAL,
+    gps_accuracy   REAL,
+    location_time  INTEGER,
+    device_info    TEXT,
+    screen_locked  INTEGER,
+    last_seen      INTEGER NOT NULL,
+    created_at     INTEGER NOT NULL
+);

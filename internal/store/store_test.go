@@ -24,8 +24,12 @@ func TestOpenMigratesOnceAndIsIdempotent(t *testing.T) {
 		if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&n); err != nil {
 			t.Fatal(err)
 		}
-		if n != 1 {
-			t.Fatalf("open #%d: %d migrations recorded, want 1", i, n)
+		ms, err := loadMigrations(migrationsFS)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n != len(ms) {
+			t.Fatalf("open #%d: %d migrations recorded, want %d", i, n, len(ms))
 		}
 		var fk int
 		if err := db.QueryRow(`PRAGMA foreign_keys`).Scan(&fk); err != nil || fk != 1 {
