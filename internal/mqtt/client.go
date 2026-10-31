@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -387,4 +388,79 @@ func (c *Client) State() State {
 // ClientID returns the persisted MQTT client ID.
 func (c *Client) ClientID() string {
 	return c.clientID
+}
+
+// Errors returned by Publish. ErrNotConnected, ErrInvalidTopic and ErrNotSent
+// prove that nothing was written to the broker; ErrConnectionLost, a timeout or
+// a cancellation while waiting for the acknowledgement do not.
+var (
+	// ErrNotConnected is returned by Publish when the broker link is down. It
+	// also wraps ErrConnectionLost when the link dropped mid-publish.
+	ErrNotConnected = errors.New("mqtt not connected")
+	// ErrConnectionLost means the link dropped before the broker acknowledged
+	// the publish: the message may or may not have been delivered.
+	ErrConnectionLost = errors.New("mqtt connection lost before publish completed")
+	// ErrInvalidTopic means the topic is not a valid command topic; nothing was sent.
+	ErrInvalidTopic = errors.New("invalid command topic")
+	// ErrNotSent means the context ended before anything was written.
+	ErrNotSent = errors.New("publish not attempted")
+)
+
+// NotSent reports whether err proves that the message was never written.
+func NotSent(err error) bool {
+	if errors.Is(err, ErrConnectionLost) {
+		return false
+	}
+	return errors.Is(err, ErrNotConnected) || errors.Is(err, ErrInvalidTopic) || errors.Is(err, ErrNotSent)
+}
+
+const publishTimeout = 10 * time.Second
+
+// mapTokenError converts a paho token error. "Not connected" proves nothing
+// was sent; a connection lost mid-publish does not (it still wraps
+// ErrNotConnected so callers see a broker outage, but NotSent is false).
+func mapTokenError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, paho.ErrNotConnected):
+		return ErrNotConnected
+	case strings.Contains(strings.ToLower(err.Error()), "connection lost"):
+		return fmt.Errorf("%w: %w", ErrNotConnected, ErrConnectionLost)
+	}
+	return fmt.Errorf("publishing command: %w", err)
+}
+
+// Publish sends payload to a command topic with QoS 1, never retained, and
+// waits for the broker's acknowledgement. The topic must be a command topic
+// under a configured prefix. Payloads are never logged. See NotSent for which
+// errors prove the message was not written.
+func (c *Client) Publish(ctx context.Context, topic string, payload []byte) error {
+	parts := strings.Split(topic, "/")
+	if len(parts) != 3 {
+		return ErrInvalidTopic
+	}
+	if _, err := NewBuilder(c.cfg.Prefixes).Command(parts[0], parts[1], parts[2]); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidTopic, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%w: %w", ErrNotSent, err)
+	}
+	if !c.Connected() || c.pc == nil || !c.pc.IsConnectionOpen() {
+		return ErrNotConnected
+	}
+	tok := c.pc.Publish(topic, 1, false, payload)
+	ctx, cancel := context.WithTimeout(ctx, publishTimeout)
+	defer cancel()
+	return waitToken(ctx, tok)
+}
+
+// waitToken waits for tok or ctx, whichever ends first.
+func waitToken(ctx context.Context, tok paho.Token) error {
+	select {
+	case <-tok.Done():
+		return mapTokenError(tok.Error())
+	case <-ctx.Done():
+		return fmt.Errorf("waiting for publish acknowledgement: %w", ctx.Err())
+	}
 }

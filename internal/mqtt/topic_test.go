@@ -84,7 +84,9 @@ func TestBuilderCommand(t *testing.T) {
 		wantErr              bool
 	}{
 		{"dradis", "phone1", "ping", "dradis/phone1/ping", false},
-		{"dradis", "phone1", "sendsms/cmd", "dradis/phone1/sendsms/cmd", false},
+		{"dradis", "phone1", "sendsms", "dradis/phone1/sendsms", false},
+		{"dradis", "phone1", "sendsms/cmd", "", true},
+		{"dradis", "phone1", "status", "", true},
 		{"other", "phone1", "ping", "", true},
 		{"dradis", "bad name", "ping", "", true},
 		{"dradis", "a/b", "ping", "", true},
