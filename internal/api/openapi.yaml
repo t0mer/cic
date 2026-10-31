@@ -1,0 +1,117 @@
+openapi: 3.0.3
+info:
+  title: CIC API
+  version: "1.0.0"
+  description: Read-only API for DRADIS devices. Authentication is not implemented yet.
+paths:
+  /api/devices:
+    get:
+      summary: List devices
+      parameters:
+        - name: include_hidden
+          in: query
+          description: Set to 1 to include hidden devices.
+          schema: { type: string, enum: ["1"] }
+      responses:
+        "200":
+          description: Devices sorted by full name, then key.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Device" }
+        "500": { $ref: "#/components/responses/Error" }
+  /api/devices/{prefix}/{device}:
+    get:
+      summary: Get one device
+      parameters:
+        - { name: prefix, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" } }
+        - { name: device, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" } }
+      responses:
+        "200":
+          description: The device.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Device" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "500": { $ref: "#/components/responses/Error" }
+  /api/broker:
+    get:
+      summary: MQTT broker connection state
+      responses:
+        "200":
+          description: Broker state. Credentials are never included.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Broker" }
+  /api/events:
+    get:
+      summary: Server-Sent Events stream
+      description: >
+        Sends `hello` (a Broker object) on connect, then `device.updated` (Device),
+        `device.removed` ({key}) and `broker.state` (Broker). A `: ping` comment is sent
+        every 25 seconds. Last-Event-ID is ignored; refetch /api/devices after reconnecting.
+      responses:
+        "200":
+          description: Event stream.
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "500": { $ref: "#/components/responses/Error" }
+  /api/openapi.yaml:
+    get:
+      summary: This specification
+      responses:
+        "200":
+          description: OpenAPI document.
+          content:
+            application/yaml:
+              schema: { type: string }
+components:
+  responses:
+    Error:
+      description: Error.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+    Broker:
+      type: object
+      required: [connected, host, last_error, since]
+      properties:
+        connected: { type: boolean }
+        host: { type: string, description: "host:port, empty when no broker is configured" }
+        last_error: { type: string }
+        since: { type: string, format: date-time, nullable: true }
+    Device:
+      type: object
+      required: [key, prefix, device, full_name, color, hidden, online, last_seen, created_at]
+      properties:
+        key: { type: string }
+        prefix: { type: string }
+        device: { type: string }
+        full_name: { type: string }
+        color: { type: string }
+        hidden: { type: boolean }
+        online: { type: boolean }
+        status: { type: boolean, nullable: true }
+        version: { type: string, nullable: true }
+        battery_level: { type: integer, nullable: true }
+        charging: { type: boolean, nullable: true }
+        charge_type: { type: string, nullable: true }
+        wifi_connected: { type: boolean, nullable: true }
+        ssid: { type: string, nullable: true }
+        latitude: { type: number, nullable: true }
+        longitude: { type: number, nullable: true }
+        gps_accuracy: { type: number, nullable: true }
+        location_time: { type: integer, format: int64, nullable: true }
+        device_info: { type: string, nullable: true }
+        screen_locked: { type: boolean, nullable: true }
+        last_seen: { type: integer, format: int64 }
+        created_at: { type: integer, format: int64 }
