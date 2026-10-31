@@ -1,16 +1,9 @@
-import {
-  Activity,
-  Map as MapIcon,
-  Monitor,
-  Moon,
-  Settings,
-  Smartphone,
-  Sun,
-  UserRound,
-} from 'lucide-react'
+import { Activity, Map as MapIcon, Monitor, Moon, Settings, Smartphone, Sun } from 'lucide-react'
 import { NavLink, Outlet } from 'react-router-dom'
 
 import { useTheme, type Theme } from '@/components/theme-provider'
+import { UserMenu } from '@/features/auth/UserMenu'
+import { useAuth } from '@/features/auth/auth-context'
 import { useBroker } from '@/features/devices/queries'
 import { useEventStream } from '@/features/devices/useEventStream'
 import { cn } from '@/lib/utils'
@@ -97,7 +90,8 @@ function BrokerDot() {
 }
 
 function Notices() {
-  const stream = useEventStream()
+  const { status, isAdmin } = useAuth()
+  const stream = useEventStream(status === 'authenticated', isAdmin)
   const { data } = useBroker()
   return (
     <>
@@ -133,15 +127,7 @@ export function AppShell() {
         <div className="ms-auto flex items-center">
           <BrokerDot />
           <ThemeToggle />
-          <button
-            type="button"
-            disabled
-            title="Sign-in arrives with the auth step"
-            aria-label="User menu (sign-in arrives with the auth step)"
-            className="inline-flex size-11 items-center justify-center rounded-md text-muted-foreground disabled:opacity-60"
-          >
-            <UserRound className="size-5" aria-hidden="true" />
-          </button>
+          <UserMenu />
         </div>
       </header>
 

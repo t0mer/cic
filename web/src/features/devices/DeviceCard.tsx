@@ -9,6 +9,8 @@ import {
 } from 'lucide-react'
 
 import { Card } from '@/components/ui/card'
+import { useAuth } from '@/features/auth/auth-context'
+import { DeviceActions } from '@/features/commands/DeviceActions'
 import { colorForKey, readableText } from '@/lib/color'
 import { firstGrapheme } from '@/lib/grapheme'
 import { formatCoords, googleMapsUrl } from '@/lib/maps'
@@ -174,6 +176,7 @@ function WifiStatus({ device }: { device: Device }) {
 }
 
 export function DeviceCard({ device, now }: { device: Device; now: number }) {
+  const { isAdmin } = useAuth()
   const name = device.full_name || device.device
   const seen =
     device.last_seen > 0 ? `Last seen ${relativeTime(device.last_seen, now)}` : 'Never seen'
@@ -194,6 +197,7 @@ export function DeviceCard({ device, now }: { device: Device; now: number }) {
         <Battery device={device} />
         <WifiStatus device={device} />
       </div>
+      {isAdmin ? <DeviceActions device={device} /> : null}
       <div className="mt-auto flex items-center gap-2 border-t pt-2 text-xs text-muted-foreground">
         <Smartphone aria-hidden="true" className="size-3.5 shrink-0" />
         <span className="shrink-0">

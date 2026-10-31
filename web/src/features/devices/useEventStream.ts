@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 
-import { brokerKey, devicesKey } from '@/lib/api'
-import type { Broker, Device } from '@/lib/types'
+import { isIssued, publishResult, toastFailure } from '@/features/commands/results'
+import { authKey, brokerKey, devicesKey } from '@/lib/api'
+import type { Broker, CommandResult, Device } from '@/lib/types'
 
 export type StreamStatus = 'connecting' | 'live' | 'reconnecting'
 
@@ -16,11 +17,19 @@ function parse<T>(e: MessageEvent): T | null {
   }
 }
 
-export function useEventStream(): StreamStatus {
+/** Connects only while `enabled` (authenticated); closes on logout and never retries into a dead session. */
+export function useEventStream(enabled: boolean, isAdmin = false): StreamStatus {
   const qc = useQueryClient()
   const [status, setStatus] = useState<StreamStatus>('connecting')
 
+  // The handler reads this through a ref so a role change never tears the stream down.
+  const adminRef = useRef(isAdmin)
   useEffect(() => {
+    adminRef.current = isAdmin
+  }, [isAdmin])
+
+  useEffect(() => {
+    if (!enabled) return
     let es: EventSource | null = null
     let retry: ReturnType<typeof setTimeout> | undefined
     let attempt = 0
@@ -41,6 +50,8 @@ export function useEventStream(): StreamStatus {
         // Browser retries on its own unless the connection was closed for good.
         if (es && es.readyState === EventSource.CLOSED && !stopped) {
           es.close()
+          // A closed stream is usually a 401: re-check the session, which disables this hook if it is gone.
+          void qc.invalidateQueries({ queryKey: authKey })
           const delay = Math.min(MAX_BACKOFF_MS, 1000 * 2 ** attempt++)
           retry = setTimeout(connect, delay)
         }
@@ -64,6 +75,13 @@ export function useEventStream(): StreamStatus {
           return next
         })
       })
+      es.addEventListener('command.result', (e) => {
+        const r = parse<CommandResult>(e as MessageEvent)
+        if (!r || r.id === undefined || r.id === null) return
+        publishResult({ ...r, id: String(r.id) })
+        // Only admins who issued this very command hear about its failure.
+        if (adminRef.current && isIssued(String(r.id))) toastFailure(r)
+      })
       es.addEventListener('device.removed', (e) => {
         const r = parse<{ key: string }>(e as MessageEvent)
         if (!r) return
@@ -74,10 +92,11 @@ export function useEventStream(): StreamStatus {
     connect()
     return () => {
       stopped = true
+      setStatus('connecting')
       clearTimeout(retry)
       es?.close()
     }
-  }, [qc])
+  }, [qc, enabled])
 
-  return status
+  return enabled ? status : 'connecting'
 }
