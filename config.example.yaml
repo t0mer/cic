@@ -18,7 +18,13 @@ mqtt:
     username: ""           # CIC_MQTT_BROKER_USERNAME
     password: ""           # CIC_MQTT_BROKER_PASSWORD (secret)
 devices:
+  # A device is online when its last status is 1 and any live (non-retained) message arrived
+  # within offline_after. Retained status only seeds the state of a device never seen live.
+  # DRADIS publishes a heartbeat every 90 s by default (minimum 15 s): keep this above that.
   offline_after: 5m        # CIC_DEVICES_OFFLINE_AFTER
+  # Maximum number of auto-discovered devices; 0 = unlimited. Beyond it, unknown devices are
+  # ignored. Broker ACLs must restrict who may publish under the configured mqtt.prefixes.
+  max_devices: 500         # CIC_DEVICES_MAX_DEVICES
 commands:
   ping_seconds: 3          # CIC_COMMANDS_PING_SECONDS
   sms_daily_cap: 50        # CIC_COMMANDS_SMS_DAILY_CAP

@@ -41,7 +41,7 @@ func TestDefaults(t *testing.T) {
 	if c.Server.Listen != ":8080" || c.Storage.Path != "/data/cic.db" || c.MQTT.Broker.Port != 1883 ||
 		c.Devices.OfflineAfter != 5*time.Minute || c.Geocode.MaxAge != 24*time.Hour ||
 		c.Audit.Retention != 2160*time.Hour || !c.Geocode.Enabled || c.Map.Provider != "openfreemap" ||
-		len(c.MQTT.Prefixes) != 1 || c.MQTT.Prefixes[0] != "dradis" || c.Commands.SMSDailyCap != 50 ||
+		len(c.MQTT.Prefixes) != 1 || c.MQTT.Prefixes[0] != "dradis" || c.Commands.SMSDailyCap != 50 || c.Devices.MaxDevices != 500 ||
 		c.Auth.OIDC.Issuer != "https://accounts.google.com" || c.Log.Format != "text" {
 		t.Fatalf("unexpected defaults: %+v", c)
 	}
@@ -117,6 +117,7 @@ func TestValidateFailures(t *testing.T) {
 		{"broker port high", func(c *Config) { c.MQTT.Broker.Host = "h"; c.MQTT.Broker.Port = 65536 }, "mqtt.broker.port"},
 		{"no prefixes", func(c *Config) { c.MQTT.Prefixes = nil }, "at least one"},
 		{"offline zero", func(c *Config) { c.Devices.OfflineAfter = 0 }, "devices.offline_after"},
+		{"max devices negative", func(c *Config) { c.Devices.MaxDevices = -1 }, "devices.max_devices"},
 		{"sms cap negative", func(c *Config) { c.Commands.SMSDailyCap = -1 }, "sms_daily_cap"},
 		{"geocode cap negative", func(c *Config) { c.Geocode.DailyCap = -1; c.Geocode.Reserve = -2 }, "geocode.daily_cap"},
 		{"geocode reserve negative", func(c *Config) { c.Geocode.Reserve = -1 }, "geocode.reserve"},
@@ -237,12 +238,13 @@ func TestUnknownKeysRejected(t *testing.T) {
 func TestEnvListAndDuration(t *testing.T) {
 	t.Setenv("CIC_MQTT_PREFIXES", "a,b")
 	t.Setenv("CIC_DEVICES_OFFLINE_AFTER", "1m")
+	t.Setenv("CIC_DEVICES_MAX_DEVICES", "7")
 	t.Setenv("CIC_AUTH_OIDC_ALLOWED_EMAILS", "x@y.z,q@y.z")
 	c, err := Load("", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(c.MQTT.Prefixes, []string{"a", "b"}) || c.Devices.OfflineAfter != time.Minute ||
+	if !reflect.DeepEqual(c.MQTT.Prefixes, []string{"a", "b"}) || c.Devices.OfflineAfter != time.Minute || c.Devices.MaxDevices != 7 ||
 		!reflect.DeepEqual(c.Auth.OIDC.AllowedEmails, []string{"x@y.z", "q@y.z"}) {
 		t.Fatalf("unexpected: %+v", c)
 	}

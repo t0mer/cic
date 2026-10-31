@@ -61,6 +61,7 @@ type BrokerConfig struct {
 // DevicesConfig configures device liveness.
 type DevicesConfig struct {
 	OfflineAfter time.Duration `mapstructure:"offline_after"`
+	MaxDevices   int           `mapstructure:"max_devices"`
 }
 
 // CommandsConfig configures remote command limits.
@@ -139,6 +140,7 @@ func newViper() *viper.Viper {
 		"mqtt.broker.username":             "",
 		"mqtt.broker.password":             "",
 		"devices.offline_after":            5 * time.Minute,
+		"devices.max_devices":              500,
 		"commands.ping_seconds":            3,
 		"commands.sms_daily_cap":           50,
 		"geocode.enabled":                  true,
@@ -230,6 +232,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Devices.OfflineAfter <= 0 {
 		errs = append(errs, fmt.Errorf("devices.offline_after %s must be greater than 0", c.Devices.OfflineAfter))
+	}
+	if c.Devices.MaxDevices < 0 {
+		errs = append(errs, fmt.Errorf("devices.max_devices %d must not be negative", c.Devices.MaxDevices))
 	}
 	if c.Commands.SMSDailyCap < 0 {
 		errs = append(errs, fmt.Errorf("commands.sms_daily_cap %d must not be negative", c.Commands.SMSDailyCap))
