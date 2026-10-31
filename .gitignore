@@ -25,9 +25,54 @@ profile.cov
 go.work
 go.work.sum
 
-# env file
-.env
+# Claude / AI assistant context — local only, never track
+# (claude.md in lowercase too: patterns are case-sensitive on Linux)
+CLAUDE.md
+claude.md
+.claude/
+.cursor/
+.aider*
 
-# Editor/IDE
-# .idea/
-# .vscode/
+# Design / implementation / planning docs — local only
+/docs/
+docs/*
+*.design.md
+*.implementation.md
+
+# Local security scan output
+scans/
+
+# Build output
+/dist/
+/bin/
+/build/
+
+# Go
+vendor/
+
+# Frontend
+web/node_modules/
+web/dist/
+web/.vite/
+*.log
+npm-debug.log*
+
+# Embedded UI build output (keep the placeholder so go:embed compiles)
+internal/webui/dist/*
+!internal/webui/dist/.gitkeep
+
+# Local dev config / data
+.env
+.env.*
+!.env.example
+/data/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
