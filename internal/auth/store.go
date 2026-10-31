@@ -48,6 +48,8 @@ var (
 	ErrNoSession   = errors.New("no valid session")
 	ErrBadUsername = errors.New("username must match " + usernamePattern)
 	ErrBadRole     = errors.New("role must be admin or viewer")
+	// ErrLastAdmin is returned by UpdateUser when the change would leave no active admin.
+	ErrLastAdmin = errors.New("the last active admin cannot be disabled or demoted")
 
 	// ErrTooManyStreams is returned by Watch when a user already has MaxStreamsPerUser streams.
 	ErrTooManyStreams = errors.New("too many open event streams")
@@ -193,7 +195,7 @@ func (s *Store) CreateUser(ctx context.Context, username, password string, role 
 	if err := ValidatePassword(password, username); err != nil {
 		return User{}, err
 	}
-	hash, err := HashPassword(password)
+	hash, err := HashPasswordContext(ctx, password)
 	if err != nil {
 		return User{}, err
 	}
@@ -246,7 +248,7 @@ func (s *Store) SetPassword(ctx context.Context, userID int64, username, passwor
 	if err := ValidatePassword(password, username); err != nil {
 		return err
 	}
-	hash, err := HashPassword(password)
+	hash, err := HashPasswordContext(ctx, password)
 	if err != nil {
 		return err
 	}
@@ -480,7 +482,7 @@ func (s *Store) ChangePassword(ctx context.Context, userID int64, username, newP
 	if err := ValidatePassword(newPassword, username); err != nil {
 		return "", Session{}, err
 	}
-	hash, err := HashPassword(newPassword)
+	hash, err := HashPasswordContext(ctx, newPassword)
 	if err != nil {
 		return "", Session{}, err
 	}
@@ -529,4 +531,87 @@ func (s *Store) passwordHash(ctx context.Context, userID int64) (string, error) 
 		return "", ErrUserMissing
 	}
 	return h, err
+}
+
+// UserByID returns the user with id, or ErrUserMissing.
+func (s *Store) UserByID(ctx context.Context, id int64) (User, error) {
+	u, err := scanUser(s.db.QueryRowContext(ctx, `SELECT `+userCols+` FROM users WHERE id = ?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return User{}, ErrUserMissing
+	}
+	if err != nil {
+		return User{}, fmt.Errorf("reading user: %w", err)
+	}
+	return u, nil
+}
+
+// UpdateUser changes a user's role and/or disabled flag (nil = unchanged) and returns the
+// result. A change that takes effect drops the user's sessions, except re-enabling.
+// Demoting or disabling the only active admin fails with ErrLastAdmin: the check is part of
+// the UPDATE statement itself, so two concurrent requests cannot both succeed.
+func (s *Store) UpdateUser(ctx context.Context, id int64, role *Role, disabled *bool) (User, error) {
+	if role != nil && !role.Valid() {
+		return User{}, ErrBadRole
+	}
+	for range 5 {
+		cur, err := s.UserByID(ctx, id)
+		if err != nil {
+			return User{}, err
+		}
+		next := cur
+		if role != nil {
+			next.Role = *role
+		}
+		if disabled != nil {
+			next.Disabled = *disabled
+		}
+		if next.Role == cur.Role && next.Disabled == cur.Disabled {
+			return cur, nil
+		}
+		q := `UPDATE users SET role = ?, disabled = ? WHERE id = ? AND role = ? AND disabled = ?`
+		args := []any{string(next.Role), b2i(next.Disabled), id, string(cur.Role), b2i(cur.Disabled)}
+		guarded := cur.Role == RoleAdmin && !cur.Disabled && !(next.Role == RoleAdmin && !next.Disabled)
+		if guarded {
+			q += ` AND EXISTS (SELECT 1 FROM users o WHERE o.id <> ? AND o.role = 'admin' AND o.disabled = 0)`
+			args = append(args, id)
+		}
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return User{}, fmt.Errorf("updating user: %w", err)
+		}
+		res, err := tx.ExecContext(ctx, q, args...)
+		if err != nil {
+			_ = tx.Rollback()
+			return User{}, fmt.Errorf("updating user: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n == 1 {
+			// The session delete shares the transaction: either both happen or neither.
+			drop := next.Role != cur.Role || next.Disabled
+			if drop {
+				if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ?`, id); err != nil {
+					_ = tx.Rollback()
+					return User{}, fmt.Errorf("dropping sessions: %w", err)
+				}
+			}
+			if err := tx.Commit(); err != nil {
+				return User{}, fmt.Errorf("updating user: %w", err)
+			}
+			if drop {
+				s.endWatchers(id, "")
+			}
+			return next, nil
+		}
+		_ = tx.Rollback()
+		again, err := s.UserByID(ctx, id)
+		if err != nil {
+			return User{}, err
+		}
+		if again.Role == cur.Role && again.Disabled == cur.Disabled {
+			if guarded {
+				return User{}, ErrLastAdmin
+			}
+			return User{}, errors.New("updating user: no row changed")
+		}
+	}
+	return User{}, errors.New("updating user: changed concurrently, try again")
 }

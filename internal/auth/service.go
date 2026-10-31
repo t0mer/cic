@@ -48,12 +48,9 @@ type Service struct {
 	trusted  []*net.IPNet
 	httpsURL bool // base_url is https
 	now      func() time.Time
-	hashSem  chan struct{} // bounds concurrent argon2 work (64 MiB each)
+	hashSem  chan struct{} // bounds concurrent argon2 work (64 MiB each); the shared hashPool
 	hashWait time.Duration // longest a request queues for a hash slot before 503
 }
-
-// hashQueueWait is how long a login may wait for an argon2 slot before answering 503.
-const hashQueueWait = 5 * time.Second
 
 // NewService builds a Service.
 func NewService(c Config) *Service {
@@ -66,7 +63,7 @@ func NewService(c Config) *Service {
 		log = slog.Default()
 	}
 	return &Service{store: NewStore(c.DB, now), limiter: NewLimiter(now), log: log,
-		insecure: c.InsecureCookies, trusted: c.TrustedProxies, now: now, hashSem: make(chan struct{}, 4),
+		insecure: c.InsecureCookies, trusted: c.TrustedProxies, now: now, hashSem: hashPool,
 		hashWait: hashQueueWait,
 		httpsURL: strings.HasPrefix(strings.ToLower(strings.TrimSpace(c.BaseURL)), "https://")}
 }
@@ -317,33 +314,34 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 
-var errBusy = errors.New("auth: too many password checks in progress")
-
-// verify checks pw against hash on a bounded pool of argon2 slots. It returns errBusy when
+// verify checks pw against hash on a bounded pool of argon2 slots. It returns ErrBusy when
 // no slot frees up within hashWait and ctx.Err() when the request ends first; in both cases
 // there is no verdict and the caller must not count a failure. newHash is non-empty when
 // the stored hash matched but uses outdated parameters and should be replaced.
 func (s *Service) verify(ctx context.Context, pw, hash string, real bool) (ok bool, newHash string, err error) {
-	wait := time.NewTimer(s.hashWait)
-	defer wait.Stop()
-	select {
-	case s.hashSem <- struct{}{}:
-		defer func() { <-s.hashSem }()
-	case <-wait.C:
-		return false, "", errBusy
-	case <-ctx.Done():
-		return false, "", ctx.Err()
+	release, err := acquireSlot(ctx, s.hashSem, s.hashWait)
+	if err != nil {
+		return false, "", err
 	}
+	defer release()
 	if !real {
 		return VerifyDummy(pw), "", ctx.Err()
 	}
 	ok, stale := verifyPassword(pw, hash)
 	if ok && stale {
-		if h, herr := HashPassword(pw); herr == nil {
+		if h, herr := HashPassword(pw); herr == nil { // slot already held
 			newHash = h
 		}
 	}
 	return ok, newHash, ctx.Err()
+}
+
+// errIfBusy passes only ErrBusy through, for handlers that treat other errors themselves.
+func errIfBusy(err error) error {
+	if errors.Is(err, ErrBusy) {
+		return err
+	}
+	return nil
 }
 
 func tooMany(w http.ResponseWriter, wait time.Duration) {
@@ -358,7 +356,7 @@ func verdictErr(w http.ResponseWriter, err error) bool {
 	switch {
 	case err == nil:
 		return false
-	case errors.Is(err, errBusy):
+	case errors.Is(err, ErrBusy):
 		w.Header().Set("Retry-After", "5")
 		writeError(w, http.StatusServiceUnavailable, "busy")
 	}
@@ -498,6 +496,9 @@ func (s *Service) changePassword(w http.ResponseWriter, r *http.Request) {
 	}
 	c, _ := r.Cookie(s.CookieName())
 	token, sess, err := s.store.ChangePassword(r.Context(), u.ID, u.Username, req.New, c.Value)
+	if verdictErr(w, errIfBusy(err)) {
+		return
+	}
 	if err != nil {
 		s.log.Error("changing password", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
