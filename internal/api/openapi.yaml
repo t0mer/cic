@@ -2,8 +2,105 @@ openapi: 3.0.3
 info:
   title: CIC API
   version: "1.0.0"
-  description: Read-only API for DRADIS devices. Authentication is not implemented yet.
+  description: >
+    API for DRADIS devices. Every endpoint except `POST /api/auth/login` requires a session:
+    log in to receive the `__Host-cic_session` cookie (HttpOnly, Secure, SameSite=Strict; plain `cic_session` only with --insecure-cookies), then send it
+    with every request. State-changing requests (anything but GET, HEAD and OPTIONS) must also
+    carry the header `X-CSRF-Token` with the `csrf_token` returned by login or `GET /api/auth/me`
+    and must be same-origin: the request needs an `Origin` header matching scheme and Host, or
+    `Sec-Fetch-Site: same-origin|none`; with neither header (or `Origin: null`, or `cross-site`/`same-site`) it is rejected
+    with 403. While `must_change_password` is true every endpoint except
+    `/api/auth/me`, `/api/auth/logout` and `/api/auth/change-password` answers
+    `403 {"error":"password change required"}`. Roles: `admin` may do everything, `viewer` is read-only.
+security:
+  - cookieAuth: []
 paths:
+  /api/auth/login:
+    post:
+      summary: Log in
+      description: >
+        Creates a session and sets the `__Host-cic_session` cookie. A user holds at most 10 sessions (least recently used is evicted). The Origin/Sec-Fetch-Site check applies;
+        no CSRF token is needed. Failures (unknown user, wrong password, disabled user) all return the
+        same 401. Failed attempts are rate limited per username (5 failures: 30 s, doubling, capped at 15 min;
+        a deliberate failure storm can therefore lock a known username out for a while) and per source address
+        (30 failures in 15 minutes; IPv6 clients are keyed by /64). A locked key answers 429 whatever the password.
+        The source IP is the TCP peer unless `server.trusted_proxies` matches it. When too many password checks are
+        already queued the answer is `503 {"error":"busy"}` and no failure is recorded.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "200":
+          description: Logged in.
+          headers:
+            Set-Cookie:
+              description: "`__Host-cic_session=<opaque>; Path=/; HttpOnly; Secure; SameSite=Strict` (with --insecure-cookies: `cic_session=<opaque>; Path=/; HttpOnly; SameSite=Strict`)."
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LoginResponse" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503":
+          description: Too many password checks queued; nothing was counted against the account. Retry shortly.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /api/auth/logout:
+    post:
+      summary: Log out
+      description: Deletes the session server-side and clears the cookie. Requires the CSRF header.
+      parameters:
+        - { $ref: "#/components/parameters/CSRF" }
+      responses:
+        "204": { description: Logged out. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/auth/me:
+    get:
+      summary: Current user
+      description: Allowed while a password change is pending. Returns the CSRF token for this session.
+      responses:
+        "200":
+          description: The signed-in user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Me" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /api/auth/change-password:
+    post:
+      summary: Change the current user's password
+      description: >
+        Verifies `current_password`, applies the policy (at least 12 characters, not equal to the
+        username, not a single repeated character, different from the current one), ends every other
+        session of the user and rotates this session to a new id and CSRF token (a new cookie is set).
+        Wrong `current_password` counts toward the username lockout.
+      parameters:
+        - { $ref: "#/components/parameters/CSRF" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ChangePasswordRequest" }
+      responses:
+        "200":
+          description: Password changed; same body as login, with the new CSRF token.
+          headers:
+            Set-Cookie:
+              description: The rotated session cookie.
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LoginResponse" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
   /api/devices:
     get:
       summary: List devices
@@ -20,6 +117,8 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Device" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "500": { $ref: "#/components/responses/Error" }
   /api/devices/{prefix}/{device}:
     get:
@@ -34,6 +133,8 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Device" }
         "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/Error" }
         "500": { $ref: "#/components/responses/Error" }
   /api/broker:
@@ -45,6 +146,8 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Broker" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /api/events:
     get:
       summary: Server-Sent Events stream
@@ -52,12 +155,17 @@ paths:
         Sends `hello` (a Broker object) on connect, then `device.updated` (Device),
         `device.removed` ({key}) and `broker.state` (Broker). A `: ping` comment is sent
         every 25 seconds. Last-Event-ID is ignored; refetch /api/devices after reconnecting.
+        The stream ends immediately when its session ends (logout, password change, disabling, eviction).
+        A user may hold at most 5 streams; the 6th is refused with 429.
       responses:
         "200":
           description: Event stream.
           content:
             text/event-stream:
               schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Error" }
   /api/openapi.yaml:
     get:
@@ -68,14 +176,86 @@ paths:
           content:
             application/yaml:
               schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: __Host-cic_session
+      description: >
+        Session cookie set by POST /api/auth/login (named `cic_session` instead when the server runs with
+        --insecure-cookies; the two names are never accepted together). State-changing requests additionally need
+        the `X-CSRF-Token` header (see the CSRF parameter).
+  parameters:
+    CSRF:
+      name: X-CSRF-Token
+      in: header
+      required: true
+      description: The `csrf_token` of the current session (from login or GET /api/auth/me).
+      schema: { type: string }
   responses:
+    Unauthorized:
+      description: No valid session (or, for login, invalid credentials).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: >
+        Rejected: missing/invalid CSRF token, cross-site request, insufficient role (`forbidden`),
+        or `password change required`.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TooManyRequests:
+      description: Login (or password change, or opening another event stream) refused after repeated failures or over the per-user limit.
+      headers:
+        Retry-After:
+          description: Seconds until the next attempt is accepted.
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
     Error:
       description: Error.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
   schemas:
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string, description: "Case-insensitive; 3-64 of A-Z a-z 0-9 . _ -" }
+        password: { type: string }
+    User:
+      type: object
+      required: [username, role, must_change_password]
+      properties:
+        username: { type: string }
+        role: { type: string, enum: [admin, viewer] }
+        must_change_password: { type: boolean }
+    LoginResponse:
+      type: object
+      required: [user, csrf_token]
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        csrf_token: { type: string }
+    Me:
+      type: object
+      required: [username, role, must_change_password, csrf_token]
+      properties:
+        username: { type: string }
+        role: { type: string, enum: [admin, viewer] }
+        must_change_password: { type: boolean }
+        csrf_token: { type: string }
+    ChangePasswordRequest:
+      type: object
+      required: [current_password, new_password]
+      properties:
+        current_password: { type: string }
+        new_password: { type: string, minLength: 12 }
     Error:
       type: object
       required: [error]

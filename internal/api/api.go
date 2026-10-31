@@ -8,15 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
-	"net/url"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/t0mer/cic/internal/auth"
 	"github.com/t0mer/cic/internal/devices"
 	"github.com/t0mer/cic/internal/events"
 	"github.com/t0mer/cic/internal/mqtt"
@@ -30,6 +29,8 @@ const (
 	maxBody          = 16 << 10
 	defaultHeartbeat = 25 * time.Second
 	defaultPoll      = time.Second
+	defaultRecheck   = 5 * time.Second
+	activeCacheTTL   = time.Second // a positive session check is trusted this long
 )
 
 // DeviceStore is the device registry as seen by the API.
@@ -58,12 +59,15 @@ type Deps struct {
 	Hub        *events.Hub
 	Log        *slog.Logger
 
-	// AllowAnyHost disables the loopback Host/cross-site guard. Set only when the
-	// operator explicitly exposed the unauthenticated API (CIC_UNSAFE_NO_AUTH).
-	AllowAnyHost bool
+	// Auth authenticates every /api request except POST /api/auth/login. Required.
+	Auth *auth.Service
 
 	Heartbeat time.Duration // SSE ping interval; default 25s
 	PollEvery time.Duration // broker state poll interval; default 1s
+
+	// SessionRecheck is how often an idle SSE stream re-validates its session against the
+	// database, to notice changes made by another process (CLI); default 5s.
+	SessionRecheck time.Duration
 }
 
 func (d Deps) log() *slog.Logger {
@@ -73,38 +77,28 @@ func (d Deps) log() *slog.Logger {
 	return slog.Default()
 }
 
-// ExposureAllowed reports whether the API may be served on listen.
-// TODO(step 7): remove when auth lands
-func ExposureAllowed(listen string, override bool) bool {
-	if override {
-		return true
-	}
-	host, _, err := net.SplitHostPort(listen)
-	if err != nil {
-		host = listen
-	}
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(strings.Trim(host, "[]"))
-	return ip != nil && ip.IsLoopback()
-}
-
 // New returns the API router, to be mounted at /api.
 func New(d Deps) http.Handler {
+	if d.Auth == nil {
+		panic("api: Deps.Auth is required; the API is never served unauthenticated")
+	}
 	r := chi.NewRouter()
 	r.Use(limitBody)
-	if !d.AllowAnyHost {
-		r.Use(loopbackOnly)
-	}
 	s := &server{Deps: d}
-	r.Get("/devices", s.listDevices)
-	r.Get("/devices/{prefix}/{device}", s.getDevice)
-	r.Get("/broker", s.broker)
-	r.Get("/events", s.sse)
-	r.Get("/openapi.yaml", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/yaml")
-		_, _ = w.Write(openAPISpec)
+	r.Mount("/auth", d.Auth.Routes())
+	// Everything else needs a session. Handlers that mutate state or touch settings
+	// add auth.RequireRole(auth.RoleAdmin) in their own group.
+	r.Group(func(r chi.Router) {
+		r.Use(d.Auth.RequireAuth)
+		r.Get("/devices", s.listDevices)
+		r.Get("/devices/{prefix}/{device}", s.getDevice)
+		r.Get("/broker", s.broker)
+		r.Get("/events", s.sse)
+		r.Get("/openapi.yaml", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/yaml")
+			w.Header().Set("Cache-Control", "no-store")
+			_, _ = w.Write(openAPISpec)
+		})
 	})
 	r.NotFound(func(w http.ResponseWriter, _ *http.Request) { writeError(w, http.StatusNotFound, "not found") })
 	r.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) {
@@ -112,38 +106,6 @@ func New(d Deps) http.Handler {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	})
 	return r
-}
-
-func isLoopbackHost(hostport string) bool {
-	host, _, err := net.SplitHostPort(hostport)
-	if err != nil {
-		host = hostport
-	}
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(strings.Trim(host, "[]"))
-	return ip != nil && ip.IsLoopback()
-}
-
-// loopbackOnly stops DNS-rebinding and cross-site reads of the unauthenticated
-// API: the Host must be a loopback name and the request must not be cross-site.
-// TODO(step 7): remove when auth lands
-func loopbackOnly(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !isLoopbackHost(r.Host) || r.Header.Get("Sec-Fetch-Site") == "cross-site" {
-			writeError(w, http.StatusForbidden, "forbidden host")
-			return
-		}
-		if o := r.Header.Get("Origin"); o != "" {
-			u, err := url.Parse(o)
-			if err != nil || !strings.EqualFold(u.Host, r.Host) {
-				writeError(w, http.StatusForbidden, "forbidden origin")
-				return
-			}
-		}
-		next.ServeHTTP(w, r)
-	})
 }
 
 func limitBody(next http.Handler) http.Handler {
