@@ -69,6 +69,9 @@ type Deps struct {
 	// Auth authenticates every /api request except POST /api/auth/login. Required.
 	Auth *auth.Service
 
+	// UI is the browser-facing configuration served by GET /api/ui-config.
+	UI UIConfig
+
 	Heartbeat time.Duration // SSE ping interval; default 25s
 	PollEvery time.Duration // broker state poll interval; default 1s
 
@@ -100,6 +103,7 @@ func New(d Deps) http.Handler {
 		r.Get("/devices", s.listDevices)
 		r.Get("/devices/{prefix}/{device}", s.getDevice)
 		r.Get("/broker", s.broker)
+		r.Get("/ui-config", s.uiConfig)
 		r.Get("/events", s.sse)
 		r.Group(func(r chi.Router) {
 			r.Use(auth.RequireRole(auth.RoleAdmin))
@@ -285,6 +289,38 @@ func (d Deps) brokerView() brokerView {
 
 func (s *server) broker(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.brokerView())
+}
+
+// UIConfig is the configuration the browser needs. It holds no secrets by construction:
+// the geocode server key never enters this struct (only whether geocoding is usable).
+type UIConfig struct {
+	Provider       string // "openfreemap" | "latlng"
+	StyleLight     string
+	StyleDark      string
+	Attribution    string
+	GeocodeEnabled bool
+	// MapOrigins are the https origins added to the CSP (see SecurityHeaders); not served.
+	MapOrigins []string
+}
+
+type uiConfigMap struct {
+	Provider    string `json:"provider"`
+	StyleLight  string `json:"style_light"`
+	StyleDark   string `json:"style_dark"`
+	Attribution string `json:"attribution"`
+}
+
+type uiConfigView struct {
+	Map            uiConfigMap `json:"map"`
+	GeocodeEnabled bool        `json:"geocode_enabled"`
+}
+
+func (s *server) uiConfig(w http.ResponseWriter, _ *http.Request) {
+	u := s.UI
+	writeJSON(w, http.StatusOK, uiConfigView{
+		Map:            uiConfigMap{Provider: u.Provider, StyleLight: u.StyleLight, StyleDark: u.StyleDark, Attribution: u.Attribution},
+		GeocodeEnabled: u.GeocodeEnabled,
+	})
 }
 
 // StartFeeds wires registry changes and broker state changes into the hub.

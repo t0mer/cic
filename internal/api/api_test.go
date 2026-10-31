@@ -368,7 +368,7 @@ func TestSpecParity(t *testing.T) {
 	}
 	for _, k := range []string{"post /api/auth/login", "post /api/auth/logout", "get /api/auth/me", "post /api/auth/change-password", "get /api/openapi.yaml",
 		"post /api/devices/{prefix}/{device}/ping", "post /api/devices/{prefix}/{device}/ping/stop", "post /api/devices/{prefix}/{device}/notify",
-		"post /api/devices/{prefix}/{device}/sms", "post /api/devices/{prefix}/{device}/refresh-status", "post /api/devices/{prefix}/{device}/refresh-location", "get /api/activity"} {
+		"post /api/devices/{prefix}/{device}/sms", "post /api/devices/{prefix}/{device}/refresh-status", "post /api/devices/{prefix}/{device}/refresh-location", "get /api/activity", "get /api/ui-config"} {
 		if !specRoutes[k] {
 			t.Errorf("spec lacks %s", k)
 		}
@@ -380,7 +380,7 @@ func TestSpecParity(t *testing.T) {
 func TestAPIRequiresAuth(t *testing.T) {
 	d, _, _ := newDeps(t)
 	h := router(d)
-	for _, p := range []string{"/api/devices", "/api/devices/dradis/a", "/api/broker", "/api/events", "/api/openapi.yaml", "/api/auth/me", "/api/activity"} {
+	for _, p := range []string{"/api/devices", "/api/devices/dradis/a", "/api/broker", "/api/events", "/api/openapi.yaml", "/api/auth/me", "/api/activity", "/api/ui-config"} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, loopbackReq("GET", p))
 		if rec.Code != http.StatusUnauthorized {

@@ -61,12 +61,20 @@ func newLogger(cfg *config.Config) *slog.Logger {
 
 func newRouter(d api.Deps, baseURL string, trusted []*net.IPNet) http.Handler {
 	r := chi.NewRouter()
-	r.Use(api.SecurityHeaders(baseURL, trusted))
+	r.Use(api.SecurityHeaders(baseURL, trusted, d.UI.MapOrigins))
 	r.Get("/healthz", api.Healthz)
 	r.Get("/readyz", api.Readyz(d))
 	r.Mount("/api", api.New(d))
 	r.NotFound(webui.Handler().ServeHTTP)
 	return r
+}
+
+// uiConfig derives the browser-facing configuration; it never carries the geocode key.
+func uiConfig(cfg *config.Config) api.UIConfig {
+	provider := cfg.Map.Provider
+	light, dark := cfg.EffectiveStyles()
+	return api.UIConfig{Provider: provider, StyleLight: light, StyleDark: dark, Attribution: cfg.Attribution(),
+		GeocodeEnabled: cfg.GeocodeUsable(), MapOrigins: cfg.MapOrigins()}
 }
 
 // warnProxyConfig flags the classic reverse-proxy misconfiguration: an https public URL
@@ -123,7 +131,10 @@ func runServe(parent context.Context, cfg *config.Config) error {
 	defer relay.Close() // runs before db.Close
 	correlator := newCorrelator(relay, nil)
 	go runSweeper(ctx, correlator, sweepEvery, time.Now)
-	deps := api.Deps{Devices: registry, DB: db, Hub: hub, Log: log, Auth: authSvc, Audit: auditLog}
+	deps := api.Deps{Devices: registry, DB: db, Hub: hub, Log: log, Auth: authSvc, Audit: auditLog, UI: uiConfig(cfg)}
+	if cfg.GeocodeKeyIsPublic() {
+		log.Error("geocode disabled: the configured key is a public maps key; set the LatLng server key (latlng_…) in CIC_GEOCODE_API_KEY and put the pk_ key in CIC_MAP_LATLNG_MAPS_KEY")
+	}
 	var publisher commands.Publisher = noBroker{}
 
 	mqttDone := make(chan struct{})

@@ -42,7 +42,7 @@ func TestSecurityHeaders(t *testing.T) {
 				req.Header.Set("X-Forwarded-Proto", c.xfp)
 			}
 			rec := httptest.NewRecorder()
-			SecurityHeaders(c.baseURL, trusted)(ok).ServeHTTP(rec, req)
+			SecurityHeaders(c.baseURL, trusted, []string{"https://tiles.openfreemap.org"})(ok).ServeHTTP(rec, req)
 			h := rec.Header()
 			want := map[string]string{
 				"X-Content-Type-Options": "nosniff",
@@ -70,4 +70,54 @@ func TestSecurityHeaders(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBuildCSP(t *testing.T) {
+	cases := []struct {
+		name    string
+		origins []string
+		want    []string
+		absent  []string
+	}{
+		{"none", nil, []string{"img-src 'self' data:;", "connect-src 'self';", "font-src 'self';"}, []string{"https://"}},
+		{"one", []string{"https://a.example"}, []string{"img-src 'self' data: https://a.example;", "connect-src 'self' https://a.example;", "font-src 'self' https://a.example;"}, nil},
+		{"dedupe and ports", []string{"https://a.example", "https://a.example", "https://b.example:8443"},
+			[]string{"img-src 'self' data: https://a.example https://b.example:8443;"}, []string{"https://a.example https://a.example"}},
+		{"injection ignored", []string{"https://a.example; script-src *", "x y", ""}, []string{"img-src 'self' data:;"}, []string{"script-src *", "x y"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			csp := buildCSP(c.origins)
+			for _, w := range c.want {
+				if !strings.Contains(csp, w) {
+					t.Errorf("CSP lacks %q: %s", w, csp)
+				}
+			}
+			for _, w := range c.absent {
+				if strings.Contains(csp, w) {
+					t.Errorf("CSP has %q: %s", w, csp)
+				}
+			}
+			// Nothing else loosens.
+			for _, w := range []string{"default-src 'self';", "script-src 'self';", "style-src 'self' 'unsafe-inline';", "worker-src 'self' blob:;",
+				"frame-ancestors 'none'", "object-src 'none'", "base-uri 'none'", "form-action 'self'"} {
+				if !strings.Contains(csp, w) {
+					t.Errorf("CSP lacks %q: %s", w, csp)
+				}
+			}
+			if strings.Count(csp, "https://") != 3*countValid(c.origins) {
+				t.Errorf("origins must appear exactly in img/connect/font: %s", csp)
+			}
+		})
+	}
+}
+
+func countValid(o []string) int {
+	seen := map[string]bool{}
+	for _, v := range o {
+		if v != "" && !strings.ContainsAny(v, " ;,'\"") {
+			seen[v] = true
+		}
+	}
+	return len(seen)
 }

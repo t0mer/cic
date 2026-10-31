@@ -339,6 +339,21 @@ paths:
               schema: { $ref: "#/components/schemas/Broker" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+  /api/ui-config:
+    get:
+      summary: Browser configuration (map styles, geocoding availability)
+      description: >
+        Any authenticated user. Never contains secrets: the geocode server key is not included,
+        only whether geocoding is usable. The style URLs may embed the public maps key (`pk_`),
+        which is browser-safe by design.
+      responses:
+        "200":
+          description: UI configuration.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UIConfig" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /api/events:
     get:
       summary: Server-Sent Events stream
@@ -554,6 +569,19 @@ components:
         host: { type: string, description: "host:port, empty when no broker is configured" }
         last_error: { type: string }
         since: { type: string, format: date-time, nullable: true }
+    UIConfig:
+      type: object
+      required: [map, geocode_enabled]
+      properties:
+        map:
+          type: object
+          required: [provider, style_light, style_dark, attribution]
+          properties:
+            provider: { type: string, enum: [openfreemap, latlng] }
+            style_light: { type: string, format: uri, description: MapLibre style URL for the light theme }
+            style_dark: { type: string, format: uri, description: MapLibre style URL for the dark theme }
+            attribution: { type: string, description: "Text to show on the map, e.g. `© OpenStreetMap contributors · OpenFreeMap`" }
+        geocode_enabled: { type: boolean, description: "True when reverse geocoding is enabled and a valid server key is configured" }
     Device:
       type: object
       required: [key, prefix, device, full_name, color, hidden, online, last_seen, created_at]
