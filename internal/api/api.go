@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -57,6 +58,10 @@ type Deps struct {
 	Hub        *events.Hub
 	Log        *slog.Logger
 
+	// AllowAnyHost disables the loopback Host/cross-site guard. Set only when the
+	// operator explicitly exposed the unauthenticated API (CIC_UNSAFE_NO_AUTH).
+	AllowAnyHost bool
+
 	Heartbeat time.Duration // SSE ping interval; default 25s
 	PollEvery time.Duration // broker state poll interval; default 1s
 }
@@ -89,6 +94,9 @@ func ExposureAllowed(listen string, override bool) bool {
 func New(d Deps) http.Handler {
 	r := chi.NewRouter()
 	r.Use(limitBody)
+	if !d.AllowAnyHost {
+		r.Use(loopbackOnly)
+	}
 	s := &server{Deps: d}
 	r.Get("/devices", s.listDevices)
 	r.Get("/devices/{prefix}/{device}", s.getDevice)
@@ -104,6 +112,38 @@ func New(d Deps) http.Handler {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	})
 	return r
+}
+
+func isLoopbackHost(hostport string) bool {
+	host, _, err := net.SplitHostPort(hostport)
+	if err != nil {
+		host = hostport
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsLoopback()
+}
+
+// loopbackOnly stops DNS-rebinding and cross-site reads of the unauthenticated
+// API: the Host must be a loopback name and the request must not be cross-site.
+// TODO(step 7): remove when auth lands
+func loopbackOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isLoopbackHost(r.Host) || r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+			writeError(w, http.StatusForbidden, "forbidden host")
+			return
+		}
+		if o := r.Header.Get("Origin"); o != "" {
+			u, err := url.Parse(o)
+			if err != nil || !strings.EqualFold(u.Host, r.Host) {
+				writeError(w, http.StatusForbidden, "forbidden origin")
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func limitBody(next http.Handler) http.Handler {

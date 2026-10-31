@@ -80,7 +80,7 @@ func router(d Deps) http.Handler {
 
 func do(h http.Handler, method, path string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(method, path, nil))
+	h.ServeHTTP(rec, loopbackReq(method, path))
 	return rec
 }
 
@@ -282,7 +282,7 @@ type noFlush struct{ http.ResponseWriter }
 func TestSSENoFlusher(t *testing.T) {
 	d, _, _ := newDeps()
 	rec := httptest.NewRecorder()
-	router(d).ServeHTTP(noFlush{rec}, httptest.NewRequest("GET", "/api/events", nil))
+	router(d).ServeHTTP(noFlush{rec}, loopbackReq("GET", "/api/events"))
 	if rec.Code != 500 {
 		t.Fatalf("code %d", rec.Code)
 	}
@@ -347,4 +347,10 @@ func TestExposureAllowed(t *testing.T) {
 			t.Errorf("%q override=%v: got %v", c.listen, c.override, got)
 		}
 	}
+}
+
+func loopbackReq(method, path string) *http.Request {
+	r := httptest.NewRequest(method, path, nil)
+	r.Host = "127.0.0.1:8787"
+	return r
 }

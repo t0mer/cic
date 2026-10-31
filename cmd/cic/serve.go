@@ -110,6 +110,7 @@ func runServe(parent context.Context, cfg *config.Config) error {
 	api.StartFeeds(ctx, deps)
 	// TODO(step 7): remove when auth lands
 	override := os.Getenv("CIC_UNSAFE_NO_AUTH") == "true"
+	deps.AllowAnyHost = override
 	apiEnabled := api.ExposureAllowed(cfg.Server.Listen, override)
 	switch {
 	case !apiEnabled:
