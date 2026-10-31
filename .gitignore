@@ -81,3 +81,4 @@ internal/webui/dist/*
 web/test-results/
 web/playwright-report/
 web/*.tsbuildinfo
+/cic

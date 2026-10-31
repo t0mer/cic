@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/t0mer/cic/internal/api"
+	"github.com/t0mer/cic/internal/auth"
 	"github.com/t0mer/cic/internal/config"
 	"github.com/t0mer/cic/internal/devices"
 	"github.com/t0mer/cic/internal/events"
@@ -43,6 +45,7 @@ func newServeCmd() *cobra.Command {
 	}
 	cmd.Flags().String("listen", ":8080", "HTTP listen address (env CIC_SERVER_LISTEN)")
 	cmd.Flags().String("db-path", "/data/cic.db", "SQLite database path (env CIC_STORAGE_PATH)")
+	cmd.Flags().Bool("insecure-cookies", false, "do not set the Secure attribute on the session cookie; plain-HTTP development only (env CIC_SERVER_INSECURE_COOKIES)")
 	return cmd
 }
 
@@ -54,20 +57,25 @@ func newLogger(cfg *config.Config) *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, opts))
 }
 
-func newRouter(d api.Deps, apiEnabled bool) http.Handler {
+func newRouter(d api.Deps, baseURL string, trusted []*net.IPNet) http.Handler {
 	r := chi.NewRouter()
+	r.Use(api.SecurityHeaders(baseURL, trusted))
 	r.Get("/healthz", api.Healthz)
 	r.Get("/readyz", api.Readyz(d))
-	// TODO(step 7): remove when auth lands
-	if apiEnabled {
-		r.Mount("/api", api.New(d))
-	} else {
-		r.HandleFunc("/api/*", func(w http.ResponseWriter, _ *http.Request) {
-			http.Error(w, `{"error":"api disabled until authentication exists"}`, http.StatusServiceUnavailable)
-		})
-	}
+	r.Mount("/api", api.New(d))
 	r.NotFound(webui.Handler().ServeHTTP)
 	return r
+}
+
+// warnProxyConfig flags the classic reverse-proxy misconfiguration: an https public URL
+// means TLS ends at a proxy, but without trusted_proxies every client appears to come from
+// the proxy's address, so they all share one login rate-limit bucket.
+func warnProxyConfig(log *slog.Logger, baseURL string, proxies []*net.IPNet) {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(baseURL)), "https") && len(proxies) == 0 {
+		log.Warn("server.base_url is https but server.trusted_proxies is empty: behind a reverse proxy every client "+
+			"shares the proxy's address for login rate limiting and X-Forwarded-Proto is ignored; list the proxy in server.trusted_proxies",
+			"base_url", baseURL)
+	}
 }
 
 func runServe(parent context.Context, cfg *config.Config) error {
@@ -88,7 +96,21 @@ func runServe(parent context.Context, cfg *config.Config) error {
 	registry.SetMaxDevices(cfg.Devices.MaxDevices)
 	hub := events.NewHub()
 	defer hub.Close()
-	deps := api.Deps{Devices: registry, DB: db, Hub: hub, Log: log}
+	proxies, err := auth.ParseProxies(cfg.Server.TrustedProxies)
+	if err != nil {
+		return fmt.Errorf("parsing server.trusted_proxies: %w", err)
+	}
+	if cfg.Server.InsecureCookies {
+		log.Warn("session cookies are not marked Secure (--insecure-cookies); use only for plain-HTTP development")
+	}
+	warnProxyConfig(log, cfg.Server.BaseURL, proxies)
+	authSvc := auth.NewService(auth.Config{DB: db, Log: log, InsecureCookies: cfg.Server.InsecureCookies,
+		TrustedProxies: proxies, BaseURL: cfg.Server.BaseURL})
+	if err := auth.Bootstrap(ctx, authSvc.Store(), log, os.Getenv); err != nil {
+		return err
+	}
+	go authSvc.RunJanitor(ctx, 10*time.Minute)
+	deps := api.Deps{Devices: registry, DB: db, Hub: hub, Log: log, Auth: authSvc}
 
 	mqttDone := make(chan struct{})
 	if cfg.BrokerConfigured() {
@@ -108,20 +130,9 @@ func runServe(parent context.Context, cfg *config.Config) error {
 	}
 
 	api.StartFeeds(ctx, deps)
-	// TODO(step 7): remove when auth lands
-	override := os.Getenv("CIC_UNSAFE_NO_AUTH") == "true"
-	deps.AllowAnyHost = override
-	apiEnabled := api.ExposureAllowed(cfg.Server.Listen, override)
-	switch {
-	case !apiEnabled:
-		log.Error("API disabled: authentication is not implemented yet and the listen address is not loopback; set CIC_UNSAFE_NO_AUTH=true to expose device locations unauthenticated, or listen on 127.0.0.1", "listen", cfg.Server.Listen)
-	case override && !api.ExposureAllowed(cfg.Server.Listen, false):
-		log.Warn("API exposed without authentication on a non-loopback address (CIC_UNSAFE_NO_AUTH=true)", "listen", cfg.Server.Listen)
-	}
-
 	srv := &http.Server{
 		Addr:              cfg.Server.Listen,
-		Handler:           newRouter(deps, apiEnabled),
+		Handler:           newRouter(deps, cfg.Server.BaseURL, proxies),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,
