@@ -29,3 +29,62 @@ export interface Broker {
   last_error: string
   since: string | null
 }
+
+export type Role = 'admin' | 'viewer'
+
+export interface Me {
+  username: string
+  role: Role
+  must_change_password: boolean
+  csrf_token: string
+}
+
+export interface LoginResponse {
+  user: { username: string; role: Role; must_change_password: boolean }
+  csrf_token: string
+}
+
+export type ErrorCode =
+  | 'invalid'
+  | 'unknown_device'
+  | 'rate_limited'
+  | 'sms_cap'
+  | 'recipient_limited'
+  | 'sms_disabled'
+  | 'not_connected'
+  | 'outcome_unknown'
+  | 'unavailable'
+
+export interface CommandAck {
+  id: string
+  action: string
+  device: string
+  sent_at: string | number
+}
+
+export type CommandStatus = 'confirmed_ok' | 'failed' | 'no_confirmation'
+
+export interface CommandResult {
+  id: string
+  action: string
+  device: string
+  status: CommandStatus
+  error?: string
+  phone_masked?: string
+}
+
+export interface ActivityItem {
+  id: string | number
+  /** RFC3339 timestamp. */
+  at: string
+  user: string
+  device: string
+  action: string
+  status: string
+  detail: string
+}
+
+export interface ActivityPage {
+  items: ActivityItem[]
+  next_before: string | number | null
+}
