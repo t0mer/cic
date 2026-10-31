@@ -76,3 +76,8 @@ internal/webui/dist/*
 .vscode/
 *.swp
 .DS_Store
+
+# Playwright output
+web/test-results/
+web/playwright-report/
+web/*.tsbuildinfo

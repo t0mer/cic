@@ -4,7 +4,7 @@ import reactHooks from 'eslint-plugin-react-hooks'
 import tseslint from 'typescript-eslint'
 
 export default tseslint.config(
-  { ignores: ['node_modules', '../internal/webui/dist', 'public'] },
+  { ignores: ['node_modules', 'test-results', 'playwright-report', '../internal/webui/dist', 'public'] },
   {
     files: ['**/*.{ts,tsx}'],
     extends: [
