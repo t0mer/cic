@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"regexp"
 	"strings"
@@ -34,6 +35,10 @@ type ServerConfig struct {
 	Listen          string `mapstructure:"listen"`
 	BaseURL         string `mapstructure:"base_url"`
 	InsecureCookies bool   `mapstructure:"insecure_cookies"`
+	// TrustedProxies lists CIDRs/IPs of reverse proxies whose X-Forwarded-For and
+	// X-Forwarded-Proto are honoured. Leave it empty only without a reverse proxy: otherwise all
+	// clients share the proxy address (one login rate-limit bucket) and https is not detected.
+	TrustedProxies []string `mapstructure:"trusted_proxies"`
 }
 
 // StorageConfig configures persistence.
@@ -117,6 +122,8 @@ var flagKeys = map[string]string{
 	"db-path":    "storage.path",
 	"log-level":  "log.level",
 	"log-format": "log.format",
+
+	"insecure-cookies": "server.insecure_cookies",
 }
 
 var prefixRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
@@ -130,6 +137,7 @@ func newViper() *viper.Viper {
 		"server.listen":                    ":8080",
 		"server.base_url":                  "",
 		"server.insecure_cookies":          false,
+		"server.trusted_proxies":           []string{},
 		"storage.path":                     "/data/cic.db",
 		"mqtt.prefixes":                    []string{"dradis"},
 		"mqtt.broker.host":                 "",
@@ -200,6 +208,14 @@ func (c *Config) Validate() error {
 	var errs []error
 	if c.Server.Listen == "" {
 		errs = append(errs, errors.New("server.listen must not be empty"))
+	}
+	for _, p := range c.Server.TrustedProxies {
+		if p = strings.TrimSpace(p); p == "" {
+			continue
+		}
+		if _, _, err := net.ParseCIDR(p); err != nil && net.ParseIP(p) == nil {
+			errs = append(errs, fmt.Errorf("server.trusted_proxies entry %q must be an IP or CIDR", p))
+		}
 	}
 	switch c.Map.Provider {
 	case "openfreemap", "latlng":

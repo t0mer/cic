@@ -1,10 +1,24 @@
 # Precedence: flags > environment (CIC_ prefix, "." -> "_") > this file > defaults.
 server:
-  # NOTE: ":8080" listens on all interfaces. Auth is not implemented yet; once it is,
-  # put the server behind TLS / a reverse proxy.
+  # NOTE: ":8080" listens on all interfaces. Every API call needs a login, but terminate TLS
+  # in front (reverse proxy): session cookies are Secure and need HTTPS (browsers also accept
+  # them on http://localhost and http://127.0.0.1).
   listen: ":8080"          # CIC_SERVER_LISTEN
+  # Public URL. An https:// value enables HSTS and makes the login Origin check expect https.
+  # With https here, ALSO list your reverse proxy in trusted_proxies (a warning is logged if not).
   base_url: ""             # CIC_SERVER_BASE_URL
-  insecure_cookies: false  # CIC_SERVER_INSECURE_COOKIES
+  insecure_cookies: false  # CIC_SERVER_INSECURE_COOKIES / --insecure-cookies: drop the cookie's Secure flag (plain-HTTP dev only)
+  # Reverse proxies (IPs or CIDRs) whose X-Forwarded-For / X-Forwarded-Proto are trusted:
+  # client address for login rate limiting, and "request was https" for Origin checks and HSTS.
+  # Empty = the TCP peer address is always used, so behind a proxy EVERY client shares the
+  # proxy's address and its login rate-limit bucket.
+  #
+  # Login throttling (fixed policy): a USERNAME locks after 5 failures (30 s, doubling, max
+  # 15 min) and a source address after 30 failures within 15 minutes (IPv6: per /64). The
+  # username lockout is global by design: anyone who can reach the login page can lock a
+  # known username out for a while by failing on purpose (denial of service on that account,
+  # not a bypass). The lockout expires on its own; restarting the service clears it.
+  trusted_proxies: []      # CIC_SERVER_TRUSTED_PROXIES (comma separated)
 storage:
   path: "/data/cic.db"     # CIC_STORAGE_PATH
 mqtt:
@@ -27,7 +41,7 @@ devices:
   max_devices: 500         # CIC_DEVICES_MAX_DEVICES
 commands:
   ping_seconds: 3          # CIC_COMMANDS_PING_SECONDS
-  sms_daily_cap: 50        # CIC_COMMANDS_SMS_DAILY_CAP
+  sms_daily_cap: 50        # CIC_COMMANDS_SMS_DAILY_CAP; billed SMS segments per UTC day, 0 disables
 geocode:
   enabled: true            # CIC_GEOCODE_ENABLED
   api_key: ""              # CIC_GEOCODE_API_KEY (secret)
@@ -50,3 +64,6 @@ audit:
 log:
   level: "info"            # CIC_LOG_LEVEL: debug | info | warn (or warning) | error
   format: "text"           # CIC_LOG_FORMAT: text | json
+# Environment-only secrets (not config keys):
+#   CIC_ADMIN_PASSWORD  initial admin password (min 12 chars); if unset a random one is logged once at first start
+#   CIC_SECRET_KEY      AES-256-GCM key for secrets at rest: 64 hex chars or base64 of 32 bytes (openssl rand -hex 32)

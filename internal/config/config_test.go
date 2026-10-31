@@ -264,3 +264,31 @@ func TestFlagBeatsYAML(t *testing.T) {
 		t.Fatalf("flag did not win: %+v", c)
 	}
 }
+
+func TestInsecureCookiesFlagAndTrustedProxies(t *testing.T) {
+	fs := testFlags()
+	fs.Bool("insecure-cookies", false, "")
+	c, err := Load("", fs)
+	if err != nil || c.Server.InsecureCookies {
+		t.Fatalf("default: %v %v", err, c)
+	}
+	if err := fs.Parse([]string{"--insecure-cookies"}); err != nil {
+		t.Fatal(err)
+	}
+	if c, err = Load("", fs); err != nil || !c.Server.InsecureCookies {
+		t.Fatalf("flag not applied: %v", err)
+	}
+
+	t.Setenv("CIC_SERVER_TRUSTED_PROXIES", "10.0.0.0/8,192.0.2.1")
+	c, err = Load("", nil)
+	if err != nil || !reflect.DeepEqual(c.Server.TrustedProxies, []string{"10.0.0.0/8", "192.0.2.1"}) {
+		t.Fatalf("env proxies: %v %v", err, c.Server.TrustedProxies)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	c.Server.TrustedProxies = []string{"not-a-cidr"}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "trusted_proxies") {
+		t.Fatalf("bad proxy accepted: %v", err)
+	}
+}
