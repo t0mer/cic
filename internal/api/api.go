@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -59,6 +60,12 @@ type Deps struct {
 	Hub        *events.Hub
 	Log        *slog.Logger
 
+	// Commands runs device commands (admin only). Nil means no broker is configured:
+	// the command routes still exist and answer 503 not_connected.
+	Commands Commander
+	// Audit stores and lists command attempts (GET /api/activity, admin only).
+	Audit ActivityLog
+
 	// Auth authenticates every /api request except POST /api/auth/login. Required.
 	Auth *auth.Service
 
@@ -94,6 +101,10 @@ func New(d Deps) http.Handler {
 		r.Get("/devices/{prefix}/{device}", s.getDevice)
 		r.Get("/broker", s.broker)
 		r.Get("/events", s.sse)
+		r.Group(func(r chi.Router) {
+			r.Use(auth.RequireRole(auth.RoleAdmin))
+			s.cmdRoutes(r)
+		})
 		r.Get("/openapi.yaml", func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/yaml")
 			w.Header().Set("Cache-Control", "no-store")
@@ -101,11 +112,90 @@ func New(d Deps) http.Handler {
 		})
 	})
 	r.NotFound(func(w http.ResponseWriter, _ *http.Request) { writeError(w, http.StatusNotFound, "not found") })
-	r.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Allow", "GET")
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	// 405: the Allow header lists the methods the route really has. Known paths outside
+	// /auth ask for a session first, so an anonymous client gets 401, never a hint about
+	// which methods exist; unknown paths stay 404.
+	allow := newAllowTable(r)
+	r.MethodNotAllowed(func(w http.ResponseWriter, req *http.Request) {
+		path := req.URL.Path // the full path, also when a sub-router dispatched here
+		methods := allow.methods(path)
+		respond := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			if len(methods) > 0 {
+				w.Header().Set("Allow", strings.Join(methods, ", "))
+			}
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		})
+		if strings.HasPrefix(path, "/auth/") || strings.HasPrefix(path, "/api/auth/") {
+			respond(w, req)
+			return
+		}
+		// The session is checked as for a GET: the method is wrong anyway, so a missing CSRF
+		// token must not turn the answer into 403.
+		probe := req.Clone(req.Context())
+		probe.Method = http.MethodGet
+		d.Auth.RequireAuth(respond).ServeHTTP(w, probe)
 	})
 	return r
+}
+
+// allowTable maps route patterns to their methods, built once from the finished router.
+type allowTable struct {
+	routes []allowRoute
+}
+
+type allowRoute struct {
+	re      *regexp.Regexp
+	methods map[string]bool
+}
+
+func newAllowTable(r chi.Router) *allowTable {
+	byPattern := map[string]*allowRoute{}
+	var order []string
+	_ = chi.Walk(r, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+		route = strings.TrimSuffix(route, "/")
+		if strings.Contains(route, "*") {
+			return nil
+		}
+		ar, ok := byPattern[route]
+		if !ok {
+			segs := strings.Split(route, "/")
+			for i, sg := range segs {
+				if strings.HasPrefix(sg, "{") && strings.HasSuffix(sg, "}") {
+					segs[i] = "[^/]+"
+				} else {
+					segs[i] = regexp.QuoteMeta(sg)
+				}
+			}
+			ar = &allowRoute{re: regexp.MustCompile("^(?:/api)?" + strings.Join(segs, "/") + "/?$"), methods: map[string]bool{}}
+			byPattern[route] = ar
+			order = append(order, route)
+		}
+		ar.methods[method] = true
+		return nil
+	})
+	t := &allowTable{}
+	for _, p := range order {
+		t.routes = append(t.routes, *byPattern[p])
+	}
+	return t
+}
+
+// methods returns the sorted methods of every route matching path.
+func (t *allowTable) methods(path string) []string {
+	set := map[string]bool{}
+	for _, ar := range t.routes {
+		if ar.re.MatchString(path) {
+			for m := range ar.methods {
+				set[m] = true
+			}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for m := range set {
+		out = append(out, m)
+	}
+	slices.Sort(out)
+	return out
 }
 
 func limitBody(next http.Handler) http.Handler {

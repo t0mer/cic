@@ -19,7 +19,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/t0mer/cic/internal/api"
+	"github.com/t0mer/cic/internal/audit"
 	"github.com/t0mer/cic/internal/auth"
+	"github.com/t0mer/cic/internal/commands"
 	"github.com/t0mer/cic/internal/config"
 	"github.com/t0mer/cic/internal/devices"
 	"github.com/t0mer/cic/internal/events"
@@ -110,15 +112,28 @@ func runServe(parent context.Context, cfg *config.Config) error {
 		return err
 	}
 	go authSvc.RunJanitor(ctx, 10*time.Minute)
-	deps := api.Deps{Devices: registry, DB: db, Hub: hub, Log: log, Auth: authSvc}
+	auditLog := audit.New(db, nil)
+	if n, err := auditLog.RecoverPending(ctx); err != nil {
+		return fmt.Errorf("recovering audit log: %w", err)
+	} else if n > 0 {
+		log.Warn("audit rows left pending by a previous run marked unknown", "rows", n)
+	}
+	go auditLog.RunJanitor(ctx, cfg.Audit.Retention, auditPurgeEvery, log)
+	relay := newOutcomeRelay(hub, auditLog, log)
+	defer relay.Close() // runs before db.Close
+	correlator := newCorrelator(relay, nil)
+	go runSweeper(ctx, correlator, sweepEvery, time.Now)
+	deps := api.Deps{Devices: registry, DB: db, Hub: hub, Log: log, Auth: authSvc, Audit: auditLog}
+	var publisher commands.Publisher = noBroker{}
 
 	mqttDone := make(chan struct{})
 	if cfg.BrokerConfigured() {
-		client, err := mqtt.New(ctx, cfg.MQTT, db, registry, log)
+		client, err := mqtt.New(ctx, cfg.MQTT, db, fanoutSink{sinks: []mqtt.Sink{registry, observerSink{correlator}}, log: log}, log)
 		if err != nil {
 			return fmt.Errorf("creating mqtt client: %w", err)
 		}
 		deps.Broker = client
+		publisher = client
 		deps.BrokerAddr = net.JoinHostPort(cfg.MQTT.Broker.Host, strconv.Itoa(cfg.MQTT.Broker.Port))
 		go func() {
 			defer close(mqttDone)
@@ -129,6 +144,14 @@ func runServe(parent context.Context, cfg *config.Config) error {
 		log.Info("mqtt broker not configured, telemetry ingest disabled")
 	}
 
+	deps.Commands = commands.NewService(publisher, registry, commands.Config{
+		Prefixes:    cfg.MQTT.Prefixes,
+		PingSeconds: cfg.Commands.PingSeconds,
+		SMSDailyCap: cfg.Commands.SMSDailyCap,
+		Log:         log,
+		Usage:       commands.SQLUsage{DB: db},
+		Correlator:  correlator,
+	})
 	api.StartFeeds(ctx, deps)
 	srv := &http.Server{
 		Addr:              cfg.Server.Listen,

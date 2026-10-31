@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/t0mer/cic/internal/auth"
+	"github.com/t0mer/cic/internal/events"
 )
 
 func (s *server) sse(w http.ResponseWriter, r *http.Request) {
@@ -25,6 +26,10 @@ func (s *server) sse(w http.ResponseWriter, r *http.Request) {
 		recheck = defaultRecheck
 	}
 	sess, _ := auth.SessionFrom(r.Context())
+	user, _ := auth.UserFrom(r.Context())
+	// command.result carries the masked recipient of an SMS: administrators only. The role
+	// is the one the stream was opened with.
+	admin := user.Role == auth.RoleAdmin
 	// ended closes the moment this session is logged out, evicted, disabled or has its
 	// password changed in this process, so the stream does not outlive it.
 	ended, stop, err := s.Auth.WatchSession(sess)
@@ -88,6 +93,9 @@ func (s *server) sse(w http.ResponseWriter, r *http.Request) {
 		case ev, open := <-ch:
 			if !open || !active() {
 				return
+			}
+			if ev.Type == events.TypeCommandResult && !admin {
+				continue
 			}
 			if err := writeEvent(w, ev.ID, ev.Type, ev.Data); err != nil {
 				return

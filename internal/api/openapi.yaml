@@ -137,6 +137,197 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/Error" }
         "500": { $ref: "#/components/responses/Error" }
+  /api/devices/{prefix}/{device}/ping:
+    post:
+      summary: Start a ping (find my phone)
+      description: >
+        Makes the phone ring for `seconds` (1-600; omitted or 0 means the configured default). The body is optional; when present Content-Type must be application/json and unknown fields are rejected. Admin only (viewers get 403). Rate limited per user per minute.
+        Returns 202 once the broker acknowledged the publish; the device's reaction is not awaited.
+      parameters:
+        - { name: prefix, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" } }
+        - { name: device, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" } }
+        - { $ref: "#/components/parameters/CSRF" }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PingRequest" }
+      responses:
+        "202":
+          description: Command published (action `ping`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommandAccepted" }
+        "400": { $ref: "#/components/responses/CommandError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/CommandForbidden" }
+        "404": { $ref: "#/components/responses/CommandError" }
+        "413": { $ref: "#/components/responses/CommandError" }
+        "415": { $ref: "#/components/responses/CommandError" }
+        "429": { $ref: "#/components/responses/CommandRateLimited" }
+        "503": { $ref: "#/components/responses/CommandError" }
+        "504": { $ref: "#/components/responses/CommandOutcomeUnknown" }
+  /api/devices/{prefix}/{device}/ping/stop:
+    post:
+      summary: Stop a running ping
+      description: >
+        Stops the ping. No body. Admin only (viewers get 403). Rate limited per user per minute.
+        Returns 202 once the broker acknowledged the publish; the device's reaction is not awaited.
+      parameters:
+        - { name: prefix, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" } }
+        - { name: device, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" } }
+        - { $ref: "#/components/parameters/CSRF" }
+      responses:
+        "202":
+          description: Command published (action `ping_stop`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommandAccepted" }
+        "400": { $ref: "#/components/responses/CommandError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/CommandForbidden" }
+        "404": { $ref: "#/components/responses/CommandError" }
+        "413": { $ref: "#/components/responses/CommandError" }
+        "415": { $ref: "#/components/responses/CommandError" }
+        "429": { $ref: "#/components/responses/CommandRateLimited" }
+        "503": { $ref: "#/components/responses/CommandError" }
+        "504": { $ref: "#/components/responses/CommandOutcomeUnknown" }
+  /api/devices/{prefix}/{device}/notify:
+    post:
+      summary: Show a notification on the device
+      description: >
+        Shows a notification; an empty title becomes `CIC`. Admin only (viewers get 403). Rate limited per user per minute.
+        Returns 202 once the broker acknowledged the publish; the device's reaction is not awaited.
+      parameters:
+        - { name: prefix, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" } }
+        - { name: device, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" } }
+        - { $ref: "#/components/parameters/CSRF" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NotifyRequest" }
+      responses:
+        "202":
+          description: Command published (action `notify`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommandAccepted" }
+        "400": { $ref: "#/components/responses/CommandError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/CommandForbidden" }
+        "404": { $ref: "#/components/responses/CommandError" }
+        "413": { $ref: "#/components/responses/CommandError" }
+        "415": { $ref: "#/components/responses/CommandError" }
+        "429": { $ref: "#/components/responses/CommandRateLimited" }
+        "503": { $ref: "#/components/responses/CommandError" }
+        "504": { $ref: "#/components/responses/CommandOutcomeUnknown" }
+  /api/devices/{prefix}/{device}/sms:
+    post:
+      summary: Send an SMS from the device
+      description: >
+        Asks the phone to send an SMS to an E.164 number. Counted in billed segments against `commands.sms_daily_cap` (0 disables SMS: 403 `sms_disabled`), at most 3 per recipient per hour. Only a 202 means the request was published; the delivery outcome arrives later as the `command.result` SSE event. Admin only (viewers get 403). Rate limited per user per minute.
+        Returns 202 once the broker acknowledged the publish; the device's reaction is not awaited.
+      parameters:
+        - { name: prefix, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" } }
+        - { name: device, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" } }
+        - { $ref: "#/components/parameters/CSRF" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SMSRequest" }
+      responses:
+        "202":
+          description: Command published (action `sms`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommandAccepted" }
+        "400": { $ref: "#/components/responses/CommandError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/CommandForbidden" }
+        "404": { $ref: "#/components/responses/CommandError" }
+        "413": { $ref: "#/components/responses/CommandError" }
+        "415": { $ref: "#/components/responses/CommandError" }
+        "429": { $ref: "#/components/responses/CommandRateLimited" }
+        "503": { $ref: "#/components/responses/CommandError" }
+        "504": { $ref: "#/components/responses/CommandOutcomeUnknown" }
+  /api/devices/{prefix}/{device}/refresh-status:
+    post:
+      summary: Ask the device to republish its status
+      description: >
+        No body. Admin only (viewers get 403). Rate limited per user per minute.
+        Returns 202 once the broker acknowledged the publish; the device's reaction is not awaited.
+      parameters:
+        - { name: prefix, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" } }
+        - { name: device, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" } }
+        - { $ref: "#/components/parameters/CSRF" }
+      responses:
+        "202":
+          description: Command published (action `getstatus`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommandAccepted" }
+        "400": { $ref: "#/components/responses/CommandError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/CommandForbidden" }
+        "404": { $ref: "#/components/responses/CommandError" }
+        "413": { $ref: "#/components/responses/CommandError" }
+        "415": { $ref: "#/components/responses/CommandError" }
+        "429": { $ref: "#/components/responses/CommandRateLimited" }
+        "503": { $ref: "#/components/responses/CommandError" }
+        "504": { $ref: "#/components/responses/CommandOutcomeUnknown" }
+  /api/devices/{prefix}/{device}/refresh-location:
+    post:
+      summary: Ask the device to publish its location
+      description: >
+        No body. Admin only (viewers get 403). Rate limited per user per minute.
+        Returns 202 once the broker acknowledged the publish; the device's reaction is not awaited.
+      parameters:
+        - { name: prefix, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" } }
+        - { name: device, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" } }
+        - { $ref: "#/components/parameters/CSRF" }
+      responses:
+        "202":
+          description: Command published (action `getlocation`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommandAccepted" }
+        "400": { $ref: "#/components/responses/CommandError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/CommandForbidden" }
+        "404": { $ref: "#/components/responses/CommandError" }
+        "413": { $ref: "#/components/responses/CommandError" }
+        "415": { $ref: "#/components/responses/CommandError" }
+        "429": { $ref: "#/components/responses/CommandRateLimited" }
+        "503": { $ref: "#/components/responses/CommandError" }
+        "504": { $ref: "#/components/responses/CommandOutcomeUnknown" }
+  /api/activity:
+    get:
+      summary: Command audit log
+      description: >
+        Admin only. Every command attempt, newest first. A row is written as `pending` before the command is
+        published (if that fails the command is refused with 503 `unavailable`), then becomes `sent`,
+        `rejected:<code>` or `unknown` (outcome not confirmed; rows left `pending` by a crash also become
+        `unknown` at startup). Rejected rows are capped at 60 per user per hour and the table at 200,000 rows
+        (oldest 5% dropped); `audit.retention` of zero or less means the default 2160h. SMS rows start as `sent` and change to
+        `confirmed_ok`, `failed` or `no_confirmation` when the phone's result arrives (or 60 s pass).
+        `detail` is at most 120 bytes and holds only the text length, its first 20 characters, and the phone
+        masked to its last 3 digits (`phone=invalid` when the number is malformed); never a full phone number
+        or full message text.
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+        - { name: before, in: query, description: "Return rows with id lower than this (use `next_before` of the previous page).", schema: { type: integer, format: int64, minimum: 1 } }
+      responses:
+        "200":
+          description: One page of the audit log.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActivityPage" }
+        "400": { $ref: "#/components/responses/CommandError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/CommandError" }
   /api/broker:
     get:
       summary: MQTT broker connection state
@@ -153,7 +344,10 @@ paths:
       summary: Server-Sent Events stream
       description: >
         Sends `hello` (a Broker object) on connect, then `device.updated` (Device),
-        `device.removed` ({key}) and `broker.state` (Broker). A `: ping` comment is sent
+        `device.removed` ({key}), `broker.state` (Broker) and `command.result` (CommandResult: the
+        outcome of an SMS, published when the phone reports it or, failing that, 60 s after sending as
+        `no_confirmation`; it never carries the raw phone number or the text). `command.result` is sent to administrator sessions
+        only; viewers never receive it. A `: ping` comment is sent
         every 25 seconds. Last-Event-ID is ignored; refetch /api/devices after reconnecting.
         The stream ends immediately when its session ends (logout, password change, disabling, eviction).
         A user may hold at most 5 streams; the 6th is refused with 429.
@@ -217,6 +411,33 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+    CommandError:
+      description: "Command error; `code` says why: `invalid` 400/413/415, `unknown_device` 404, `not_connected` and `unavailable` 503 (nothing was sent; `unavailable` is also returned when the audit intent row could not be written, in which case nothing is published)."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/CommandError" }
+    CommandForbidden:
+      description: "Rejected by the session layer (missing CSRF token, or the viewer role: error `forbidden`, no `code`) or `sms_disabled` (`code` present)."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/CommandError" }
+    CommandRateLimited:
+      description: "`rate_limited` (per-user per-minute), `recipient_limited` (3 SMS per number per hour) or `sms_cap` (daily segment cap). Retry-After is an upper bound in seconds."
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/CommandError" }
+    CommandOutcomeUnknown:
+      description: >
+        `outcome_unknown`: the broker did not confirm in time. The command MAY still be delivered
+        (and an SMS reservation is kept). Commands are not idempotent: clients and proxies must NOT
+        retry automatically; the body carries `"retry": false` and the response is `Cache-Control: no-store`.
+        The audit row is `unknown`.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/CommandError" }
     Error:
       description: Error.
       content:
@@ -261,6 +482,70 @@ components:
       required: [error]
       properties:
         error: { type: string }
+    CommandError:
+      type: object
+      required: [error, code]
+      properties:
+        error: { type: string }
+        code: { type: string, enum: [invalid, unknown_device, rate_limited, sms_cap, recipient_limited, sms_disabled, not_connected, outcome_unknown, unavailable] }
+        retry: { type: boolean, enum: [false], description: "Present only for `outcome_unknown`: do not retry automatically." }
+    CommandAccepted:
+      type: object
+      required: [id, action, device, sent_at]
+      properties:
+        id: { type: string }
+        action: { type: string, enum: [ping, ping_stop, notify, sms, getstatus, getlocation] }
+        device: { type: string, description: "<prefix>/<device>" }
+        sent_at: { type: string, format: date-time }
+    PingRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        seconds: { type: integer, minimum: 0, maximum: 600, description: "0 or omitted: configured default" }
+    NotifyRequest:
+      type: object
+      additionalProperties: false
+      required: [text]
+      properties:
+        title: { type: string, maxLength: 100, description: "Default `CIC`" }
+        text: { type: string, maxLength: 1000 }
+    SMSRequest:
+      type: object
+      additionalProperties: false
+      required: [phone, text]
+      properties:
+        phone: { type: string, pattern: "^\\+[1-9][0-9]{6,14}$", description: "E.164" }
+        text: { type: string, maxLength: 1600 }
+    CommandResult:
+      type: object
+      description: Data of the `command.result` SSE event.
+      required: [id, action, device, status]
+      properties:
+        id: { type: string }
+        action: { type: string, enum: [sms] }
+        device: { type: string }
+        status: { type: string, enum: [confirmed_ok, failed, no_confirmation] }
+        error: { type: string, maxLength: 120, description: "Sanitized phone-side error (number-like digit runs removed), at most 120 characters, only for failed" }
+        phone_masked: { type: string, example: "+*********567" }
+    ActivityItem:
+      type: object
+      required: [id, at, user, device, action, status, detail]
+      properties:
+        id: { type: integer, format: int64 }
+        at: { type: string, format: date-time }
+        user: { type: string }
+        device: { type: string }
+        action: { type: string }
+        status: { type: string, description: "pending, sent, unknown, rejected:<code>, confirmed_ok, failed or no_confirmation" }
+        detail: { type: string, description: "sms: `phone=<masked> len=<n> \"<first 20 chars>\"`; notify: `len=<n> \"<first 20 chars>\"`; ping: `seconds=<n|default>`" }
+    ActivityPage:
+      type: object
+      required: [items, next_before]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/ActivityItem" }
+        next_before: { type: integer, format: int64, nullable: true }
     Broker:
       type: object
       required: [connected, host, last_error, since]

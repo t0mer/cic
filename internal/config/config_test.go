@@ -292,3 +292,19 @@ func TestInsecureCookiesFlagAndTrustedProxies(t *testing.T) {
 		t.Fatalf("bad proxy accepted: %v", err)
 	}
 }
+
+func TestNonPositiveAuditRetentionMeansDefault(t *testing.T) {
+	for _, d := range []time.Duration{0, -time.Hour} {
+		c, err := Load("", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Audit.Retention = d
+		if err := c.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		if c.Audit.Retention != 2160*time.Hour {
+			t.Errorf("retention %v -> %v, want 2160h", d, c.Audit.Retention)
+		}
+	}
+}

@@ -246,6 +246,9 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
+	if c.Audit.Retention <= 0 {
+		c.Audit.Retention = 2160 * time.Hour // never "keep forever": the audit table must not grow unbounded
+	}
 	if c.Devices.OfflineAfter <= 0 {
 		errs = append(errs, fmt.Errorf("devices.offline_after %s must be greater than 0", c.Devices.OfflineAfter))
 	}
