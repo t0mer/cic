@@ -31,7 +31,7 @@ func Open(ctx context.Context, path string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening database: %w", err)
 	}
-	if err := db.PingContext(ctx); err != nil {
+	if err := connect(ctx, db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("connecting to database: %w", err)
 	}
@@ -46,15 +46,36 @@ func Open(ctx context.Context, path string) (*sql.DB, error) {
 	return db, nil
 }
 
+// connect opens the first connection. Switching a fresh database to WAL can fail with
+// SQLITE_BUSY immediately, ignoring busy_timeout, while another process is doing the same
+// switch; that connection is discarded, so retrying with a short bounded backoff is safe.
+// Once the file is in WAL mode the pragma is a no-op for every later connection.
+func connect(ctx context.Context, db *sql.DB) error {
+	var err error
+	for i := range 40 {
+		if err = db.PingContext(ctx); err == nil || !strings.Contains(err.Error(), "SQLITE_BUSY") {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(10+5*i) * time.Millisecond):
+		}
+	}
+	return err
+}
+
 // pathEscaper protects the characters that would otherwise end or corrupt the
 // path part of a SQLite URI; SQLite decodes %XX in URI paths itself.
 var pathEscaper = strings.NewReplacer("%", "%25", "?", "%3F", "#", "%23")
 
 func dsn(path string) string {
 	u := url.URL{
-		Scheme:   "file",
-		Opaque:   pathEscaper.Replace(path),
-		RawQuery: "_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(5000)",
+		Scheme: "file",
+		Opaque: pathEscaper.Replace(path),
+		// busy_timeout must come first: pragmas run in order on every new connection, and
+		// switching to WAL takes a lock that fails at once (SQLITE_BUSY) without a busy handler.
+		RawQuery: "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)",
 	}
 	return u.String()
 }

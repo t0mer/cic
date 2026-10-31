@@ -161,3 +161,28 @@ func TestMigrateConcurrentStarts(t *testing.T) {
 		}
 	}
 }
+
+func TestMigrateConcurrentStartsStress(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "s.db")
+	var wg sync.WaitGroup
+	errs := make(chan error, 32)
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			db, err := Open(ctx, path)
+			if err == nil {
+				db.Close()
+			}
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
