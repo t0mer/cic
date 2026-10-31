@@ -1,0 +1,46 @@
+# Precedence: flags > environment (CIC_ prefix, "." -> "_") > this file > defaults.
+server:
+  # NOTE: ":8080" listens on all interfaces. Auth is not implemented yet; once it is,
+  # put the server behind TLS / a reverse proxy.
+  listen: ":8080"          # CIC_SERVER_LISTEN
+  base_url: ""             # CIC_SERVER_BASE_URL
+  insecure_cookies: false  # CIC_SERVER_INSECURE_COOKIES
+storage:
+  path: "/data/cic.db"     # CIC_STORAGE_PATH
+mqtt:
+  prefixes: ["dradis"]     # CIC_MQTT_PREFIXES (comma separated)
+  broker:
+    host: ""               # CIC_MQTT_BROKER_HOST
+    port: 1883             # CIC_MQTT_BROKER_PORT
+    tls: false             # CIC_MQTT_BROKER_TLS
+    ca_file: ""            # CIC_MQTT_BROKER_CA_FILE
+    insecure_skip_verify: false  # CIC_MQTT_BROKER_INSECURE_SKIP_VERIFY
+    username: ""           # CIC_MQTT_BROKER_USERNAME
+    password: ""           # CIC_MQTT_BROKER_PASSWORD (secret)
+devices:
+  offline_after: 5m        # CIC_DEVICES_OFFLINE_AFTER
+commands:
+  ping_seconds: 3          # CIC_COMMANDS_PING_SECONDS
+  sms_daily_cap: 50        # CIC_COMMANDS_SMS_DAILY_CAP
+geocode:
+  enabled: true            # CIC_GEOCODE_ENABLED
+  api_key: ""              # CIC_GEOCODE_API_KEY (secret)
+  min_move_meters: 150     # CIC_GEOCODE_MIN_MOVE_METERS
+  max_age: 24h             # CIC_GEOCODE_MAX_AGE
+  daily_cap: 250           # CIC_GEOCODE_DAILY_CAP
+  reserve: 20              # CIC_GEOCODE_RESERVE
+map:
+  provider: "openfreemap"  # CIC_MAP_PROVIDER: openfreemap | latlng
+  latlng_maps_key: ""      # CIC_MAP_LATLNG_MAPS_KEY
+auth:
+  oidc:
+    enabled: false                          # CIC_AUTH_OIDC_ENABLED
+    issuer: "https://accounts.google.com"   # CIC_AUTH_OIDC_ISSUER
+    client_id: ""                           # CIC_AUTH_OIDC_CLIENT_ID
+    client_secret: ""                       # CIC_AUTH_OIDC_CLIENT_SECRET (secret)
+    allowed_emails: []                      # CIC_AUTH_OIDC_ALLOWED_EMAILS
+audit:
+  retention: 2160h         # CIC_AUDIT_RETENTION
+log:
+  level: "info"            # CIC_LOG_LEVEL: debug | info | warn (or warning) | error
+  format: "text"           # CIC_LOG_FORMAT: text | json
