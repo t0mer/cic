@@ -58,8 +58,9 @@ type Registry struct {
 	log          *slog.Logger
 	limitWarn    ratelog.Limiter
 
-	mu    sync.RWMutex
-	hooks []func(Device)
+	mu          sync.RWMutex
+	hooks       []func(Device)
+	removeHooks []func(Device)
 }
 
 // NewRegistry returns a Registry; see Device.Online for the liveness rule.
@@ -77,6 +78,13 @@ func (r *Registry) SetMaxDevices(n int) {
 func (r *Registry) OnChange(fn func(Device)) {
 	r.mu.Lock()
 	r.hooks = append(r.hooks, fn)
+	r.mu.Unlock()
+}
+
+// OnRemove registers fn to be called, with the removed device, after every successful Delete.
+func (r *Registry) OnRemove(fn func(Device)) {
+	r.mu.Lock()
+	r.removeHooks = append(r.removeHooks, fn)
 	r.mu.Unlock()
 }
 
@@ -343,10 +351,76 @@ func (r *Registry) SetProfile(ctx context.Context, key, fullName, color string, 
 	return affected(res, err, "updating profile of", key)
 }
 
-// Delete removes a device; it reappears on its next message.
+// ProfilePatch is a partial update of the user-editable fields; nil fields stay unchanged.
+type ProfilePatch struct {
+	FullName *string
+	Color    *string
+	Hidden   *bool
+}
+
+// UpdateProfile applies p to the device with key in one transaction and returns the updated
+// device together with the hidden flag it had before, or store.ErrNotFound. Reading the old
+// value inside the transaction that writes the new one makes the transition exact even when
+// several edits race. It does not call the OnChange hooks: the caller announces it.
+func (r *Registry) UpdateProfile(ctx context.Context, key string, p ProfilePatch) (d Device, wasHidden bool, err error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Device{}, false, fmt.Errorf("updating profile of device %q: %w", key, err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	// A no-op write first: it takes SQLite's write lock up front (waiting on busy_timeout)
+	// instead of upgrading a read snapshot that a concurrent writer may have invalidated.
+	res, err := tx.ExecContext(ctx, `UPDATE devices SET hidden = hidden WHERE key = ?`, key)
+	if err := affected(res, err, "updating profile of", key); err != nil {
+		return Device{}, false, err
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT hidden FROM devices WHERE key = ?`, key).Scan(&wasHidden); err != nil {
+		return Device{}, false, fmt.Errorf("reading device %q: %w", key, err)
+	}
+	var sets []string
+	var args []any
+	if p.FullName != nil {
+		sets, args = append(sets, "full_name = ?"), append(args, *p.FullName)
+	}
+	if p.Color != nil {
+		sets, args = append(sets, "color = ?"), append(args, *p.Color)
+	}
+	if p.Hidden != nil {
+		sets, args = append(sets, "hidden = ?"), append(args, *p.Hidden)
+	}
+	if len(sets) > 0 {
+		res, err := tx.ExecContext(ctx, `UPDATE devices SET `+strings.Join(sets, ", ")+` WHERE key = ?`, append(args, key)...)
+		if err := affected(res, err, "updating profile of", key); err != nil {
+			return Device{}, false, err
+		}
+	}
+	d, err = r.scan(tx.QueryRowContext(ctx, `SELECT `+columns+` FROM devices WHERE key = ?`, key))
+	if err != nil {
+		return Device{}, false, fmt.Errorf("reading device %q: %w", key, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Device{}, false, fmt.Errorf("updating profile of device %q: %w", key, err)
+	}
+	return d, wasHidden, nil
+}
+
+// Delete removes a device and calls the OnRemove hooks; it reappears on its next message.
+// The row is read and deleted in one statement, so the hooks see the state that was removed.
 func (r *Registry) Delete(ctx context.Context, key string) error {
-	res, err := r.db.ExecContext(ctx, `DELETE FROM devices WHERE key = ?`, key)
-	return affected(res, err, "deleting", key)
+	d, err := r.scan(r.db.QueryRowContext(ctx, `DELETE FROM devices WHERE key = ? RETURNING `+columns, key))
+	if errors.Is(err, sql.ErrNoRows) {
+		return store.ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("deleting device %q: %w", key, err)
+	}
+	r.mu.RLock()
+	hooks := slices.Clone(r.removeHooks)
+	r.mu.RUnlock()
+	for _, fn := range hooks {
+		fn(d)
+	}
+	return nil
 }
 
 func affected(res sql.Result, err error, what, key string) error {

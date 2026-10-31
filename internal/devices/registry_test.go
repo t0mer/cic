@@ -399,3 +399,93 @@ func TestApplyAndDeleteRace(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestUpdateProfileAndDeleteHook(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	ctx := context.Background()
+	mustApply(t, r, ev(mqtt.LeafBattery, t0, mqtt.Battery{Level: new(5)}))
+	var removed []Device
+	r.OnRemove(func(d Device) { removed = append(removed, d) })
+
+	name, color, hidden := "Tablet", "#aabbcc", true
+	d, was, err := r.UpdateProfile(ctx, "dradis/phone1", ProfilePatch{FullName: &name, Color: &color, Hidden: &hidden})
+	if err != nil || was || d.FullName != "Tablet" || d.Color != "#aabbcc" || !d.Hidden {
+		t.Fatalf("%+v %v", d, err)
+	}
+	empty := ""
+	d, was, err = r.UpdateProfile(ctx, "dradis/phone1", ProfilePatch{FullName: &empty}) // others untouched
+	if err != nil || !was || d.FullName != "phone1" || d.Color != "#aabbcc" || !d.Hidden {
+		t.Fatalf("partial: %+v %v", d, err)
+	}
+	if _, _, err := r.UpdateProfile(ctx, "dradis/ghost", ProfilePatch{Hidden: &hidden}); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("unknown: %v", err)
+	}
+	if err := r.Delete(ctx, "dradis/ghost"); !errors.Is(err, store.ErrNotFound) || len(removed) != 0 {
+		t.Errorf("delete unknown: %v %v", err, removed)
+	}
+	if err := r.Delete(ctx, "dradis/phone1"); err != nil || len(removed) != 1 || removed[0].Key != "dradis/phone1" || !removed[0].Hidden {
+		t.Errorf("delete: %v %+v", err, removed)
+	}
+	if _, err := r.Get(ctx, "dradis/phone1"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("still there: %v", err)
+	}
+}
+
+func TestDeleteHookSeesHiddenAtDeletion(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	ctx := context.Background()
+	mustApply(t, r, ev(mqtt.LeafBattery, t0, mqtt.Battery{Level: new(5)}))
+	var removed []Device
+	r.OnRemove(func(d Device) { removed = append(removed, d) })
+	hidden := true
+	if _, _, err := r.UpdateProfile(ctx, "dradis/phone1", ProfilePatch{Hidden: &hidden}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Delete(ctx, "dradis/phone1"); err != nil || len(removed) != 1 || !removed[0].Hidden {
+		t.Fatalf("hook must see the hidden row: %v %+v", err, removed)
+	}
+}
+
+func TestUpdateProfileConcurrentChainsPreviousHidden(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	ctx := context.Background()
+	mustApply(t, r, ev(mqtt.LeafBattery, t0, mqtt.Battery{Level: new(5)}))
+	// Each update reports the flag the previous committed update left behind (initially false).
+	type step struct{ was, now bool }
+	var mu sync.Mutex
+	var steps []step
+	var wg sync.WaitGroup
+	for i := range 16 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			h := i%2 == 0
+			d, was, err := r.UpdateProfile(ctx, "dradis/phone1", ProfilePatch{Hidden: &h})
+			if err != nil {
+				t.Errorf("update: %v", err)
+				return
+			}
+			mu.Lock()
+			steps = append(steps, step{was, d.Hidden})
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	// Net number of false->true flips minus true->false flips must equal the final state.
+	net := 0
+	for _, st := range steps {
+		switch {
+		case !st.was && st.now:
+			net++
+		case st.was && !st.now:
+			net--
+		}
+	}
+	final, err := r.Get(ctx, "dradis/phone1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[bool]int{false: 0, true: 1}[final.Hidden]; net != want {
+		t.Fatalf("net flips %d, final hidden=%v: %+v", net, final.Hidden, steps)
+	}
+}
