@@ -273,7 +273,13 @@ func (s *Service) send(ctx context.Context, user, key, action, leaf string, body
 				}
 			}
 		}
-		return Result{}, s.publishError(action, key, err)
+		perr := s.publishError(action, key, err)
+		if errors.Is(perr, ErrOutcomeUnknown) {
+			// The command may still arrive: hand the id back so the caller can
+			// audit it and match a late result.
+			return Result{ID: id, Action: action, DeviceKey: key, SentAt: now}, perr
+		}
+		return Result{}, perr
 	}
 	res := Result{ID: id, Action: action, DeviceKey: key, SentAt: now}
 	s.cfg.Log.Info("command sent", "action", action, "device", key, "id", res.ID)

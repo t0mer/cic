@@ -472,9 +472,17 @@ func TestPublishErrorContract(t *testing.T) {
 			cor := NewCorrelator(func(o Outcome) { got = append(got, o) }, nil)
 			svc, pub := newSMSSvc(t, SQLUsage{DB: openDB(t)}, cor, nil)
 			pub.err = tt.err
-			_, err := svc.SendSMS(context.Background(), "u", dev, "+972501234567", "x")
+			res, err := svc.SendSMS(context.Background(), "u", dev, "+972501234567", "x")
 			if !errors.Is(err, tt.want) {
 				t.Fatalf("got %v, want %v", err, tt.want)
+			}
+			// An unknown outcome hands the id back so it can be audited and matched to a
+			// late result; a proven non-send returns nothing.
+			if tt.want == ErrOutcomeUnknown && (res.ID == "" || res.DeviceKey != dev || res.Action == "") {
+				t.Errorf("unknown outcome result = %+v, want id/device/action set", res)
+			}
+			if tt.want != ErrOutcomeUnknown && res.ID != "" {
+				t.Errorf("proven non-send returned id %q", res.ID)
 			}
 			if tt.want == ErrOutcomeUnknown && (errors.Is(err, ErrNotConnected) || errors.Is(err, ErrInvalid)) {
 				t.Errorf("unknown outcome also matches a proven-unsent sentinel: %v", err)
