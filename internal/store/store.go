@@ -25,6 +25,10 @@ var migrationsFS embed.FS
 
 // Open opens (creating if needed) the SQLite database at path and applies migrations.
 func Open(ctx context.Context, path string) (*sql.DB, error) {
+	path, err := normalizePath(runtime.GOOS, path)
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, fmt.Errorf("creating database directory: %w", err)
 	}
@@ -70,7 +74,36 @@ func connect(ctx context.Context, db *sql.DB) error {
 // path part of a SQLite URI; SQLite decodes %XX in URI paths itself.
 var pathEscaper = strings.NewReplacer("%", "%25", "?", "%3F", "#", "%23")
 
+func isLetter(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
+
 func dsn(path string) string { return dsnFor(runtime.GOOS, path) }
+
+// normalizePath prepares a database path for the connection string. On Windows the driver
+// treats the first '?' of a plain DSN as the start of the parameters, and the extended-length
+// prefix (\\?\C:\... or \\?\UNC\server\share\...) contains one, so the prefix is removed
+// (the paths are equivalent below the classic length limit; longer paths need Windows long
+// path support). A '?' left anywhere else is not a valid Windows file name character.
+func normalizePath(goos, path string) (string, error) {
+	if goos != "windows" {
+		return path, nil
+	}
+	switch {
+	case len(path) >= 8 && strings.EqualFold(path[:8], `\\?\UNC\`):
+		path = `\\` + path[8:]
+	case strings.HasPrefix(path, `\\?\`), strings.HasPrefix(path, `\\.\`):
+		rest := path[4:]
+		// Only drive-letter paths are supported behind the prefix; volume GUIDs, device and
+		// pipe names would otherwise turn into a meaningless relative path.
+		if len(rest) < 3 || !isLetter(rest[0]) || rest[1] != ':' || (rest[2] != '\\' && rest[2] != '/') {
+			return "", fmt.Errorf("database path %q is not supported: use a drive-letter or UNC path", path)
+		}
+		path = rest
+	}
+	if strings.ContainsAny(path, "?*\"<>|") {
+		return "", fmt.Errorf("database path %q contains characters that are not valid in a Windows file name", path)
+	}
+	return path, nil
+}
 
 // busy_timeout must come first: pragmas run in order on every new connection, and
 // switching to WAL takes a lock that fails at once (SQLITE_BUSY) without a busy handler.

@@ -201,3 +201,38 @@ func TestDSNFor(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizePath(t *testing.T) {
+	cases := []struct {
+		goos, in, want string
+		bad            bool
+	}{
+		{"linux", "/data/a?b.db", "/data/a?b.db", false},
+		{"windows", `C:\ProgramData\cic\cic.db`, `C:\ProgramData\cic\cic.db`, false},
+		{"windows", "cic.db", "cic.db", false},
+		{"windows", `\\?\C:\ProgramData\cic\cic.db`, `C:\ProgramData\cic\cic.db`, false},
+		{"windows", `\\?\UNC\srv\share\cic.db`, `\\srv\share\cic.db`, false},
+		{"windows", `\\.\C:\x\cic.db`, `C:\x\cic.db`, false},
+		{"windows", `\\?\unc\srv\share\cic.db`, `\\srv\share\cic.db`, false},
+		{"windows", `\\?\Volume{1234}\x\cic.db`, "", true},
+		{"windows", `\\.\pipe\x`, "", true},
+		{"windows", `\\?\GLOBALROOT\x\cic.db`, "", true},
+		{"windows", `C:\a?b\cic.db`, "", true},
+		{"windows", `\\?\C:\a*b.db`, "", true},
+	}
+	for _, c := range cases {
+		got, err := normalizePath(c.goos, c.in)
+		if c.bad {
+			if err == nil {
+				t.Errorf("normalizePath(%q, %q) = %q, want an error", c.goos, c.in, got)
+			}
+			continue
+		}
+		if err != nil || got != c.want {
+			t.Errorf("normalizePath(%q, %q) = %q, %v; want %q", c.goos, c.in, got, err, c.want)
+		}
+		if c.goos == "windows" && strings.Contains(dsnFor(c.goos, got), "?") && strings.Index(dsnFor(c.goos, got), "?") != len(got) {
+			t.Errorf("dsn for %q has a '?' inside the path", got)
+		}
+	}
+}
