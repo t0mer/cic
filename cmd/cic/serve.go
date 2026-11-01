@@ -124,16 +124,21 @@ func runServe(parent context.Context, cfg *config.Config) error {
 		log.Warn("session cookies are not marked Secure (--insecure-cookies); use only for plain-HTTP development")
 	}
 	warnProxyConfig(log, cfg.Server.BaseURL, proxies)
-	secretKey, created, err := secret.LoadOrCreateKey(os.Getenv(secret.KeyEnv),
-		filepath.Join(filepath.Dir(cfg.Storage.Path), "secret.key"), log)
+	secretKey, err := loadSecretKey(os.Getenv(secret.KeyEnv), filepath.Join(filepath.Dir(cfg.Storage.Path), "secret.key"), log)
 	if err != nil {
-		return fmt.Errorf("loading secret key: %w", err)
-	}
-	if created {
-		log.Info("generated a new secret key file for encrypting two-factor secrets; back it up with the database", "path", filepath.Join(filepath.Dir(cfg.Storage.Path), "secret.key"))
+		return err
 	}
 	authSvc := auth.NewService(auth.Config{DB: db, Log: log, InsecureCookies: cfg.Server.InsecureCookies,
 		TrustedProxies: proxies, BaseURL: cfg.Server.BaseURL, SecretKey: secretKey})
+	if secretKey == nil {
+		// Without a key nobody can complete a second factor: with enrolled users that must
+		// not look like a healthy start.
+		if has, err := authSvc.Store().HasTOTPUsers(ctx); err != nil {
+			return err
+		} else if has {
+			return errors.New("two-factor is enabled for some accounts but the secret key is unavailable; restore secret.key or set CIC_SECRET_KEY")
+		}
+	}
 	if err := authSvc.Store().CheckTOTPKey(ctx); err != nil {
 		log.Error("two-factor secrets cannot be decrypted; two-factor logins will fail until the original secret key is restored", "err", err)
 	}
@@ -225,4 +230,23 @@ func runServe(parent context.Context, cfg *config.Config) error {
 		return fmt.Errorf("shutting down http server: %w", err)
 	}
 	return nil
+}
+
+// loadSecretKey loads (or creates) the two-factor encryption key. An invalid CIC_SECRET_KEY
+// is an operator error and stops startup. Any other failure (for example an unwritable data
+// directory) is logged and yields a nil key: installs that never use two-factor keep
+// working, and the two-factor endpoints answer 503.
+func loadSecretKey(envValue, keyPath string, log *slog.Logger) ([]byte, error) {
+	key, created, err := secret.LoadOrCreateKey(envValue, keyPath, log)
+	if err != nil {
+		if strings.TrimSpace(envValue) != "" {
+			return nil, fmt.Errorf("loading secret key: %w", err)
+		}
+		log.Error("secret key unavailable; two-factor authentication is disabled until it is fixed", "path", keyPath, "err", err)
+		return nil, nil
+	}
+	if created {
+		log.Info("generated a new secret key file for encrypting two-factor secrets; back it up with the database", "path", keyPath)
+	}
+	return key, nil
 }
