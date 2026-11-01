@@ -507,7 +507,14 @@ func (s *Service) startSession(w http.ResponseWriter, r *http.Request, u User, o
 		}
 	}
 	if err := s.store.evictOverCap(r.Context(), u.ID); err != nil {
-		s.log.Warn("enforcing session cap", "err", err)
+		// The cap is a security limit: do not hand out a session that leaves the account
+		// over it. Take the new one back (best effort) and fail the login.
+		s.log.Error("enforcing session cap", "err", err)
+		if derr := s.store.DeleteSession(context.WithoutCancel(r.Context()), token); derr != nil {
+			s.log.Error("removing session after failed cap enforcement", "err", derr)
+		}
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return true
 	}
 	if err := s.store.TouchLogin(r.Context(), u.ID); err != nil {
 		s.log.Warn("recording login time", "err", err)
