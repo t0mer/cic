@@ -10,6 +10,7 @@ import {
   changePassword as apiChangePassword,
   fetchMe,
   login as apiLogin,
+  loginTwoFactor,
   logout as apiLogout,
   setAuthHandlers,
   setCsrfToken,
@@ -47,15 +48,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => setAuthHandlers(null)
   }, [qc, wipe])
 
-  const login = useCallback(
-    async (username: string, password: string) => {
-      const res = await apiLogin(username, password)
-      setCsrfToken(res.csrf_token)
+  const startSession = useCallback(
+    async (csrf: string) => {
+      setCsrfToken(csrf)
       bumpSession() // a /me that started before this login must not overwrite the new token
       wipe()
       await qc.invalidateQueries({ queryKey: authKey })
     },
     [qc, wipe],
+  )
+
+  const login = useCallback(
+    async (username: string, password: string) => {
+      const res = await apiLogin(username, password)
+      if ('mfa_required' in res) return { mfaToken: res.mfa_token }
+      await startSession(res.csrf_token)
+    },
+    [startSession],
+  )
+
+  const verifyMfa = useCallback(
+    async (mfaToken: string, code: string) => {
+      const res = await loginTwoFactor(mfaToken, code)
+      await startSession(res.csrf_token)
+    },
+    [startSession],
   )
 
   const logout = useCallback(async () => {
@@ -99,10 +116,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       error: me.error,
       retry: () => void me.refetch(),
       login,
+      verifyMfa,
       logout,
       changePassword,
     }),
-    [status, user, me, login, logout, changePassword],
+    [status, user, me, login, verifyMfa, logout, changePassword],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

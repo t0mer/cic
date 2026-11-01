@@ -18,7 +18,8 @@ describe('role-based rendering', () => {
     expect(tabs.map((t) => t.textContent)).toEqual(['Account'])
     expect(screen.getByRole('heading', { name: 'Account' })).toBeTruthy()
     await new Promise((r) => setTimeout(r, 50))
-    expect(calls).toEqual([])
+    // Only the viewer's own two-factor status; nothing admin-only.
+    expect(calls.map((c) => c.url)).toEqual(['/api/auth/2fa'])
     expect(visibleTabs(false).map((t) => t.id)).toEqual(['account'])
   })
 

@@ -11,7 +11,10 @@ export interface AuthValue {
   mustChangePassword: boolean
   error: Error | null
   retry: () => void
-  login: (username: string, password: string) => Promise<void>
+  /** Resolves with an `mfaToken` when a second factor is needed, otherwise signs in. */
+  login: (username: string, password: string) => Promise<{ mfaToken: string } | void>
+  /** Completes a two-factor login with a TOTP or backup code. */
+  verifyMfa: (mfaToken: string, code: string) => Promise<void>
   logout: () => Promise<void>
   changePassword: (current: string, next: string) => Promise<void>
 }
@@ -27,6 +30,7 @@ export const AuthContext = createContext<AuthValue>({
   error: null,
   retry: () => {},
   login: reject,
+  verifyMfa: reject,
   logout: reject,
   changePassword: reject,
 })
