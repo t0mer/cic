@@ -33,6 +33,8 @@ type fakeStore struct {
 	removeHooks []func(devices.Device)
 }
 
+func (f *fakeStore) OnRefresh(fn func()) {}
+
 func (f *fakeStore) OnRemove(fn func(devices.Device)) {
 	f.mu.Lock()
 	f.removeHooks = append(f.removeHooks, fn)

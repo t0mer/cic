@@ -353,6 +353,88 @@ paths:
         "429": { $ref: "#/components/responses/CommandRateLimited" }
         "503": { $ref: "#/components/responses/CommandError" }
         "504": { $ref: "#/components/responses/CommandOutcomeUnknown" }
+  /api/places:
+    get:
+      summary: List safe places
+      description: Administrators only (viewers get `safe_place` on each device). Sorted by name (case-insensitive).
+      responses:
+        "200":
+          description: All safe places.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Place" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      summary: Create a safe place (admin)
+      description: >
+        Name is trimmed, 1-40 characters without control characters, unique case-insensitively (409 `duplicate_name`).
+        Latitude -90..90, longitude -180..180, radius 10-50000 m, at most 100 places (400 `invalid`).
+        Audit: `place_create`. Device `safe_place` fields update live through `device.updated` events.
+      parameters:
+        - { $ref: "#/components/parameters/CSRF" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PlaceInput" }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Place" }
+        "400": { $ref: "#/components/responses/SettingsError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/SettingsError" }
+        "429": { $ref: "#/components/responses/SettingsRateLimited" }
+        "500": { $ref: "#/components/responses/SettingsError" }
+        "503": { $ref: "#/components/responses/SettingsError" }
+  /api/places/{id}:
+    patch:
+      summary: Edit a safe place (admin)
+      description: >
+        Partial update: omitted fields stay unchanged; the merged place is validated as on create. Audit `place_update`.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, format: int64, minimum: 1 } }
+        - { $ref: "#/components/parameters/CSRF" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PlacePatch" }
+      responses:
+        "200":
+          description: The updated place.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Place" }
+        "400": { $ref: "#/components/responses/SettingsError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/SettingsError" }
+        "409": { $ref: "#/components/responses/SettingsError" }
+        "429": { $ref: "#/components/responses/SettingsRateLimited" }
+        "500": { $ref: "#/components/responses/SettingsError" }
+        "503": { $ref: "#/components/responses/SettingsError" }
+    delete:
+      summary: Delete a safe place (admin)
+      description: Audit `place_delete`.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, format: int64, minimum: 1 } }
+        - { $ref: "#/components/parameters/CSRF" }
+      responses:
+        "204": { description: Deleted. }
+        "400": { $ref: "#/components/responses/SettingsError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/SettingsError" }
+        "429": { $ref: "#/components/responses/SettingsRateLimited" }
+        "500": { $ref: "#/components/responses/SettingsError" }
+        "503": { $ref: "#/components/responses/SettingsError" }
   /api/users:
     get:
       summary: List users (admin)
@@ -624,7 +706,7 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/CommandError" }
     SettingsError:
-      description: "Settings error; `code` says why: `invalid` 400/413/415, `unknown_device` or `not_found` 404, `user_exists` or `forbidden_change` 409, `unavailable` 500/503 (nothing was changed), `busy` 503 (password hashing capacity stayed exhausted for 5 s; retry later, nothing was changed)."
+      description: "Settings error; `code` says why: `invalid` 400/413/415, `unknown_device` or `not_found` 404, `user_exists`, `duplicate_name` or `forbidden_change` 409, `unavailable` 500/503 (nothing was changed), `busy` 503 (password hashing capacity stayed exhausted for 5 s; retry later, nothing was changed)."
       content:
         application/json:
           schema: { $ref: "#/components/schemas/SettingsError" }
@@ -692,7 +774,33 @@ components:
       required: [error, code]
       properties:
         error: { type: string }
-        code: { type: string, enum: [invalid, unknown_device, not_found, user_exists, forbidden_change, rate_limited, unavailable, busy] }
+        code: { type: string, enum: [invalid, unknown_device, not_found, user_exists, duplicate_name, forbidden_change, rate_limited, unavailable, busy] }
+    Place:
+      type: object
+      required: [id, name, latitude, longitude, radius_m]
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        latitude: { type: number }
+        longitude: { type: number }
+        radius_m: { type: integer, minimum: 10, maximum: 50000 }
+    PlaceInput:
+      type: object
+      additionalProperties: false
+      required: [name, latitude, longitude, radius_m]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 40 }
+        latitude: { type: number, minimum: -90, maximum: 90 }
+        longitude: { type: number, minimum: -180, maximum: 180 }
+        radius_m: { type: integer, minimum: 10, maximum: 50000 }
+    PlacePatch:
+      type: object
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 40 }
+        latitude: { type: number, minimum: -90, maximum: 90 }
+        longitude: { type: number, minimum: -180, maximum: 180 }
+        radius_m: { type: integer, minimum: 10, maximum: 50000 }
     DevicePatch:
       type: object
       additionalProperties: false
@@ -850,6 +958,14 @@ components:
         location_time: { type: integer, format: int64, nullable: true }
         location_name: { type: string, nullable: true, description: "Reverse-geocoded place name of the last fix; null while unresolved or when geocoding is off" }
         location_name_at: { type: integer, format: int64, nullable: true, description: "Unix seconds the name was resolved" }
+        safe_place:
+          type: object
+          nullable: true
+          description: "The safe place the last fix lies in (overlaps: smallest distance/radius ratio wins); null when in none or without a location. Computed, never stored."
+          required: [id, name]
+          properties:
+            id: { type: integer, format: int64 }
+            name: { type: string }
         device_info: { type: string, nullable: true }
         screen_locked: { type: boolean, nullable: true }
         last_seen: { type: integer, format: int64 }

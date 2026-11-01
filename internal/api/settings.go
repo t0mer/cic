@@ -133,10 +133,14 @@ func (s *server) limitWrites(next http.Handler) http.Handler {
 func (s *server) settingsRoutes(r chi.Router) {
 	r.Get("/users", s.listUsers)
 	r.Get("/geocode/usage", s.geocodeUsage)
+	r.Get("/places", s.listPlaces)
 	r.Group(func(r chi.Router) {
 		r.Use(s.limitWrites)
 		r.Patch("/devices/{prefix}/{device}", s.patchDevice)
 		r.Delete("/devices/{prefix}/{device}", s.deleteDevice)
+		r.Post("/places", s.createPlace)
+		r.Patch("/places/{id}", s.patchPlace)
+		r.Delete("/places/{id}", s.deletePlace)
 		r.Post("/users", s.createUser)
 		r.Patch("/users/{id}", s.patchUser)
 		r.Post("/users/{id}/reset-password", s.resetPassword)

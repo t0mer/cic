@@ -45,9 +45,15 @@ type setEnv struct {
 	who  map[string]*setSess
 }
 
-func newSetEnv(t *testing.T) *setEnv {
+func newSetEnv(t *testing.T) *setEnv { return newSetEnvWith(t, nil) }
+
+// newSetEnvWith is newSetEnv with a hook to adjust the Deps before the feeds start.
+func newSetEnvWith(t *testing.T, mut func(*Deps)) *setEnv {
 	t.Helper()
 	d, fs, _ := newDeps(t)
+	if mut != nil {
+		mut(&d)
+	}
 	e := &setEnv{fs: fs, logs: &lockedBuf{}, who: map[string]*setSess{}}
 	d.Log = slog.New(slog.NewTextHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	d.Audit = audit.New(testDB, nil)

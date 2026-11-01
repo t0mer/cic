@@ -47,6 +47,8 @@ type DeviceStore interface {
 	// Delete removes a device (store.ErrNotFound if unknown) and calls the OnRemove hooks.
 	Delete(ctx context.Context, key string) error
 	OnRemove(fn func(devices.Device))
+	// OnRefresh registers fn to run when many devices changed at once (a safe place edit).
+	OnRefresh(fn func())
 }
 
 // GeocodeUsage reports today's reverse-geocoding counters.
@@ -81,6 +83,9 @@ type Deps struct {
 	Geocode GeocodeUsage
 	// Audit stores and lists command attempts (GET /api/activity, admin only).
 	Audit ActivityLog
+
+	// Places holds the safe places (administrators only; viewers get safe_place on each device).
+	Places PlaceStore
 
 	// Auth authenticates every /api request except POST /api/auth/login. Required.
 	Auth *auth.Service
@@ -359,6 +364,7 @@ func StartFeeds(ctx context.Context, d Deps) {
 	d.Devices.OnChange(func(dev devices.Device) {
 		d.Hub.Publish(events.TypeDeviceUpdated, dev)
 	})
+	d.Devices.OnRefresh(func() { d.Hub.Publish(events.TypeDevicesRefresh, nil) })
 	d.Devices.OnRemove(func(dev devices.Device) {
 		d.Hub.Publish(events.TypeDeviceRemoved, removedEvent{Key: dev.Key, hidden: dev.Hidden})
 	})

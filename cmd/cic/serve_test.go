@@ -30,6 +30,7 @@ func (fakeDevices) Get(context.Context, string) (devices.Device, error) {
 }
 func (fakeDevices) OnChange(func(devices.Device)) {}
 func (fakeDevices) OnRemove(func(devices.Device)) {}
+func (fakeDevices) OnRefresh(func())              {}
 func (fakeDevices) UpdateProfile(context.Context, string, devices.ProfilePatch) (devices.Device, bool, error) {
 	return devices.Device{}, false, store.ErrNotFound
 }
