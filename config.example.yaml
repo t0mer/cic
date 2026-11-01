@@ -20,7 +20,7 @@ server:
   # not a bypass). The lockout expires on its own; restarting the service clears it.
   trusted_proxies: []      # CIC_SERVER_TRUSTED_PROXIES (comma separated)
 storage:
-  path: "/data/cic.db"     # CIC_STORAGE_PATH
+  path: "/data/cic.db"     # CIC_STORAGE_PATH (this is the Docker/Linux default; on Windows the default is cic.db in the working directory, so remove or change this line there)
 mqtt:
   prefixes: ["dradis"]     # CIC_MQTT_PREFIXES (comma separated)
   broker:

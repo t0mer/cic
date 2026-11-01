@@ -228,3 +228,19 @@ func TestLinkFailureOtherThanExistIsNotSwallowed(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestModeWarns(t *testing.T) {
+	cases := []struct {
+		goos string
+		perm os.FileMode
+		want bool
+	}{
+		{"linux", 0o600, false}, {"linux", 0o640, true}, {"linux", 0o604, true},
+		{"darwin", 0o644, true}, {"windows", 0o666, false}, {"windows", 0o600, false},
+	}
+	for _, c := range cases {
+		if got := modeWarns(c.goos, c.perm); got != c.want {
+			t.Errorf("modeWarns(%q, %o) = %v, want %v", c.goos, c.perm, got, c.want)
+		}
+	}
+}

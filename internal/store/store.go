@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -69,14 +70,20 @@ func connect(ctx context.Context, db *sql.DB) error {
 // path part of a SQLite URI; SQLite decodes %XX in URI paths itself.
 var pathEscaper = strings.NewReplacer("%", "%25", "?", "%3F", "#", "%23")
 
-func dsn(path string) string {
-	u := url.URL{
-		Scheme: "file",
-		Opaque: pathEscaper.Replace(path),
-		// busy_timeout must come first: pragmas run in order on every new connection, and
-		// switching to WAL takes a lock that fails at once (SQLITE_BUSY) without a busy handler.
-		RawQuery: "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)",
+func dsn(path string) string { return dsnFor(runtime.GOOS, path) }
+
+// busy_timeout must come first: pragmas run in order on every new connection, and
+// switching to WAL takes a lock that fails at once (SQLITE_BUSY) without a busy handler.
+const dsnQuery = "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)"
+
+// dsnFor builds the connection string. On Windows the path is passed as a plain file name
+// (the driver strips the query from a DSN without the file: prefix and opens the rest as is),
+// because a Windows path such as C:\data\cic.db is not a valid URI path.
+func dsnFor(goos, path string) string {
+	if goos == "windows" {
+		return path + "?" + dsnQuery
 	}
+	u := url.URL{Scheme: "file", Opaque: pathEscaper.Replace(path), RawQuery: dsnQuery}
 	return u.String()
 }
 
