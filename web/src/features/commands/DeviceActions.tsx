@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button'
 import { DeviceDeleteDialog } from '@/features/settings/DeviceDeleteDialog'
 import { DeviceEditDialog } from '@/features/settings/DeviceEditDialog'
 import type { Device } from '@/lib/types'
+import { HistoryLink } from '@/features/history/HistoryLink'
 import { NotifyDialog } from './NotifyDialog'
 import { PingControl } from './PingControl'
 import { SmsDialog } from './SmsDialog'
@@ -46,6 +47,7 @@ export function DeviceActions({ device }: { device: Device }) {
     <div className="flex flex-col gap-2" data-testid="device-actions">
       <div className="flex flex-wrap items-center gap-1.5">
         <PingControl device={device} />
+        <HistoryLink device={device} />
         <Button
           variant="outline"
           className={actionBtn}

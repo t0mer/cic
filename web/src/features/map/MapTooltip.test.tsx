@@ -51,6 +51,16 @@ describe('MapTooltip', () => {
     expect(screen.queryByRole('button', { name: /Ping/ })).toBeNull()
   })
 
+  it('links to the history page for admins only', () => {
+    show('admin')
+    expect(
+      screen.getByRole('link', { name: /Location history of Pixel/ }).getAttribute('href'),
+    ).toBe('/devices/dradis/pixel/history')
+    cleanup()
+    show('viewer')
+    expect(screen.queryByRole('link', { name: /Location history/ })).toBeNull()
+  })
+
   it('shows the safe place badge before the address, or before the coordinates', () => {
     const safe_place = { id: 1, name: 'Home' }
     show('viewer', makeDevice({ safe_place, location_name: 'Dizengoff St, Tel Aviv' }))

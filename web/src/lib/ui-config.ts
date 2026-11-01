@@ -27,6 +27,7 @@ export function parseUiConfig(raw: unknown): UiConfig {
       attribution: typeof map.attribution === 'string' ? map.attribution : '',
     },
     geocode_enabled: o.geocode_enabled === true,
+    history_enabled: o.history_enabled === true,
   }
 }
 

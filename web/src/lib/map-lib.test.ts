@@ -113,8 +113,11 @@ describe('parseUiConfig', () => {
       attribution: 'OpenFreeMap',
     },
     geocode_enabled: true,
+    history_enabled: true,
   }
   it('accepts a valid config', () => expect(parseUiConfig(ok)).toEqual(ok))
+  it('defaults history_enabled to false', () =>
+    expect(parseUiConfig({ ...ok, history_enabled: undefined }).history_enabled).toBe(false))
   it('rejects non-https style URLs', () => {
     expect(() =>
       parseUiConfig({ ...ok, map: { ...ok.map, style_light: 'http://x.test/s' } }),

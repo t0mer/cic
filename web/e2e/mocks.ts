@@ -111,6 +111,7 @@ export const uiConfig = {
     attribution: 'Test map data',
   },
   geocode_enabled: true,
+  history_enabled: true,
 }
 
 /** Serves the two style URLs from route handlers (never the network). */
@@ -182,6 +183,46 @@ export interface MockState {
   requests: Recorded[]
   /** Override the response for command POSTs. */
   commandError: { status: number; json: unknown; headers?: Record<string, string> } | null
+  /** Recorded history points per device key (unix seconds). The phone has 4 past days of them. */
+  history: Record<string, MockHistoryPoint[]>
+  /** The history answer carries `truncated: true`. */
+  historyTruncated: boolean
+  /** History/routes answer 500 while set. */
+  historyFails: boolean
+}
+
+export interface MockHistoryPoint {
+  t: number
+  lat: number
+  lon: number
+  accuracy: number | null
+}
+
+/** A short walk per past day (noon, one point per 5 min), so day rows are stable at any hour. */
+function fakeHistory(): MockHistoryPoint[] {
+  const out: MockHistoryPoint[] = []
+  const today = new Date()
+  for (let back = 4; back >= 1; back--) {
+    const noon = new Date(today.getFullYear(), today.getMonth(), today.getDate() - back, 12)
+    for (let k = 0; k < 12; k++)
+      out.push({
+        t: Math.floor(noon.getTime() / 1000) + k * 300,
+        lat: 32.0853 + k * 0.0009 + back * 0.002,
+        lon: 34.7818 + k * 0.0007,
+        accuracy: k % 4 === 3 ? null : 10 + k,
+      })
+  }
+  return out
+}
+
+const haversine = (a: MockHistoryPoint, b: MockHistoryPoint) => {
+  const rad = Math.PI / 180
+  const dLat = (b.lat - a.lat) * rad
+  const dLon = (b.lon - a.lon) * rad
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(dLon / 2) ** 2
+  return 2 * 6371000 * Math.asin(Math.sqrt(h))
 }
 
 export const PASSWORD = 'correct-password-123'
@@ -254,6 +295,9 @@ export async function mockApi(
     csrf: 'csrf-token-1',
     requests: [],
     commandError: null,
+    history: { 'dradis/pixel': fakeHistory() },
+    historyTruncated: false,
+    historyFails: false,
     devices: structuredClone(devices),
     places: [{ id: 1, name: 'Home', latitude: 32.0853, longitude: 34.7818, radius_m: 150 }],
     users: [
@@ -543,6 +587,40 @@ export async function mockApi(
       if (state.user.role !== 'admin')
         return r.fulfill({ status: 403, json: { error: 'forbidden' } })
       return r.fulfill({ json: activityPages[url.searchParams.get('before') ? 1 : 0] })
+    }
+    const h = /^\/api\/devices\/([^/]+)\/([^/]+)\/(history|routes)$/.exec(path)
+    if (h && method === 'GET') {
+      if (!isAdmin) return forbidden()
+      if (state.historyFails)
+        return r.fulfill({ status: 500, json: { error: 'history unavailable' } })
+      const from = Date.parse(url.searchParams.get('from') ?? '')
+      const to = Date.parse(url.searchParams.get('to') ?? '')
+      if (!(from < to) || to - from > 31 * 86_400_000)
+        return r.fulfill({ status: 400, json: { error: 'invalid range', code: 'invalid' } })
+      const key = `${decodeURIComponent(h[1])}/${decodeURIComponent(h[2])}`
+      const pts = (state.history[key] ?? []).filter((p) => p.t * 1000 >= from && p.t * 1000 < to)
+      if (h[3] === 'history') {
+        const limit = Number(url.searchParams.get('limit')) || pts.length
+        return r.fulfill({
+          json: { points: pts.slice(0, limit), truncated: state.historyTruncated },
+        })
+      }
+      const tz = url.searchParams.get('tz') || 'UTC'
+      const fmt = new Intl.DateTimeFormat('en-CA', { timeZone: tz })
+      const byDay = new Map<string, MockHistoryPoint[]>()
+      for (const p of pts) {
+        const d = fmt.format(new Date(p.t * 1000))
+        byDay.set(d, [...(byDay.get(d) ?? []), p])
+      }
+      const days = [...byDay.entries()].map(([date, ps]) => ({
+        date,
+        distance_m: ps.slice(1).reduce((n, p, i) => n + haversine(ps[i], p), 0),
+        point_count: ps.length,
+        first: ps[0].t,
+        last: ps[ps.length - 1].t,
+        segments: [ps.map((p) => [p.lat, p.lon, p.t])],
+      }))
+      return r.fulfill({ json: { days } })
     }
     const m = /^\/api\/devices\/([^/]+)\/([^/]+)\/(.+)$/.exec(path)
     if (m && method === 'POST') {
