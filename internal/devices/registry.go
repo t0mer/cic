@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -37,10 +38,16 @@ type Device struct {
 	Longitude     *float64 `json:"longitude"`
 	GPSAccuracy   *float64 `json:"gps_accuracy"`
 	LocationTime  *int64   `json:"location_time"`
-	DeviceInfo    *string  `json:"device_info"`
-	ScreenLocked  *bool    `json:"screen_locked"`
-	LastSeen      int64    `json:"last_seen"`
-	CreatedAt     int64    `json:"created_at"`
+	// LocationName is the reverse-geocoded place name of the last fix; nil while unresolved.
+	LocationName   *string `json:"location_name"`
+	LocationNameAt *int64  `json:"location_name_at"` // unix seconds the name was resolved
+	// GeocodedLat/Lon are the coordinates LocationName was resolved for; internal bookkeeping.
+	GeocodedLat  *float64 `json:"-"`
+	GeocodedLon  *float64 `json:"-"`
+	DeviceInfo   *string  `json:"device_info"`
+	ScreenLocked *bool    `json:"screen_locked"`
+	LastSeen     int64    `json:"last_seen"`
+	CreatedAt    int64    `json:"created_at"`
 }
 
 // ErrDeviceLimit is returned by Apply when a new device would exceed the configured cap.
@@ -148,6 +155,10 @@ func (r *Registry) Apply(ctx context.Context, ev mqtt.Event) error {
 		} else if stale {
 			r.log.Debug("stale location ignored", "device", key, "location_time", locationTime(ev, loc))
 			set, args = "", nil
+		} else if far, err := movedFarFromName(ctx, tx, key, loc.Latitude, loc.Longitude); err != nil {
+			return err
+		} else if far {
+			set += `, location_name = NULL, location_name_at = NULL, geocoded_lat = NULL, geocoded_lon = NULL`
 		}
 	}
 	parts, args := withLiveness(ev, set, args, seen)
@@ -174,6 +185,33 @@ func locationTime(ev mqtt.Event, loc mqtt.Location) int64 {
 		return *loc.Time
 	}
 	return ev.ReceivedAt.Unix()
+}
+
+// nameKeepMeters is how far a device may move from the point its place name was resolved
+// for before that name is dropped as stale.
+const nameKeepMeters = 1000
+
+// movedFarFromName reports whether (lat, lon) is more than nameKeepMeters from the
+// coordinates the stored place name was resolved for.
+func movedFarFromName(ctx context.Context, tx *sql.Tx, key string, lat, lon float64) (bool, error) {
+	var gLat, gLon sql.NullFloat64
+	err := tx.QueryRowContext(ctx, `SELECT geocoded_lat, geocoded_lon FROM devices WHERE key = ?`, key).Scan(&gLat, &gLon)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && !(gLat.Valid && gLon.Valid)) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reading geocoded point of device %q: %w", key, err)
+	}
+	return haversine(gLat.Float64, gLon.Float64, lat, lon) > nameKeepMeters, nil
+}
+
+func haversine(lat1, lon1, lat2, lon2 float64) float64 {
+	const earth = 6371000.0
+	rad := math.Pi / 180
+	dLat, dLon := (lat2-lat1)*rad, (lon2-lon1)*rad
+	h := math.Sin(dLat/2)*math.Sin(dLat/2) +
+		math.Cos(lat1*rad)*math.Cos(lat2*rad)*math.Sin(dLon/2)*math.Sin(dLon/2)
+	return 2 * earth * math.Asin(math.Min(1, math.Sqrt(h)))
 }
 
 func staleLocation(ctx context.Context, tx *sql.Tx, key string, t int64) (bool, error) {
@@ -263,7 +301,7 @@ func (r *Registry) notify(ctx context.Context, key string) {
 
 const columns = `key, prefix, device, full_name, color, hidden, status, version, battery_level, charging,
 	charge_type, wifi_connected, ssid, latitude, longitude, gps_accuracy, location_time, device_info,
-	screen_locked, last_seen, created_at`
+	screen_locked, last_seen, created_at, location_name, location_name_at, geocoded_lat, geocoded_lon`
 
 type scanner interface{ Scan(...any) error }
 
@@ -273,11 +311,13 @@ func (r *Registry) scan(s scanner) (Device, error) {
 		hidden                          bool
 		status, charging, wifi, locked  sql.NullBool
 		version, chargeType, ssid, info sql.NullString
-		level, locTime                  sql.NullInt64
-		lat, lon, acc                   sql.NullFloat64
+		locName                         sql.NullString
+		level, locTime, locNameAt       sql.NullInt64
+		lat, lon, acc, gLat, gLon       sql.NullFloat64
 	)
 	if err := s.Scan(&d.Key, &d.Prefix, &d.Device, &d.FullName, &d.Color, &hidden, &status, &version, &level,
-		&charging, &chargeType, &wifi, &ssid, &lat, &lon, &acc, &locTime, &info, &locked, &d.LastSeen, &d.CreatedAt); err != nil {
+		&charging, &chargeType, &wifi, &ssid, &lat, &lon, &acc, &locTime, &info, &locked, &d.LastSeen, &d.CreatedAt,
+		&locName, &locNameAt, &gLat, &gLon); err != nil {
 		return Device{}, err
 	}
 	d.Hidden = hidden
@@ -292,6 +332,10 @@ func (r *Registry) scan(s scanner) (Device, error) {
 	d.Longitude = nullable(lon.Float64, lon.Valid)
 	d.GPSAccuracy = nullable(acc.Float64, acc.Valid)
 	d.LocationTime = nullable(locTime.Int64, locTime.Valid)
+	d.LocationName = nullable(locName.String, locName.Valid)
+	d.LocationNameAt = nullable(locNameAt.Int64, locNameAt.Valid)
+	d.GeocodedLat = nullable(gLat.Float64, gLat.Valid)
+	d.GeocodedLon = nullable(gLon.Float64, gLon.Valid)
 	d.DeviceInfo = nullable(info.String, info.Valid)
 	d.ScreenLocked = nullable(locked.Bool, locked.Valid)
 	if d.FullName == "" {
@@ -349,6 +393,23 @@ func (r *Registry) SetProfile(ctx context.Context, key, fullName, color string, 
 	res, err := r.db.ExecContext(ctx, `UPDATE devices SET full_name = ?, color = ?, hidden = ? WHERE key = ?`,
 		fullName, color, hidden, key)
 	return affected(res, err, "updating profile of", key)
+}
+
+// SetLocationName stores the place name resolved for the coordinates lat/lon and calls the
+// OnChange hooks so clients see it. It only applies while the device is still at those
+// coordinates: if it moved meanwhile (or was deleted) it returns store.ErrNotFound and the
+// newer fix is geocoded on its own.
+func (r *Registry) SetLocationName(ctx context.Context, key, name string, lat, lon float64, at time.Time) error {
+	// An empty name records "resolved, nothing here": the column is NULLed, never left as the
+	// name of some other place.
+	res, err := r.db.ExecContext(ctx, `UPDATE devices SET location_name = NULLIF(?, ''), location_name_at = ?,
+		geocoded_lat = ?, geocoded_lon = ? WHERE key = ? AND latitude = ? AND longitude = ?`,
+		name, at.Unix(), lat, lon, key, lat, lon)
+	if err := affected(res, err, "naming location of", key); err != nil {
+		return err
+	}
+	r.notify(ctx, key)
+	return nil
 }
 
 // ProfilePatch is a partial update of the user-editable fields; nil fields stay unchanged.

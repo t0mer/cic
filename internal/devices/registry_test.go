@@ -489,3 +489,86 @@ func TestUpdateProfileConcurrentChainsPreviousHidden(t *testing.T) {
 		t.Fatalf("net flips %d, final hidden=%v: %+v", net, final.Hidden, steps)
 	}
 }
+
+func TestSetLocationName(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	ctx := context.Background()
+	at := int64(1700000000)
+	ev := mqtt.Event{Prefix: "dradis", Device: "p", Leaf: mqtt.LeafLocation,
+		Payload: mqtt.Location{Latitude: 32.1, Longitude: 34.8, Time: &at}, ReceivedAt: time.Unix(at, 0)}
+	if err := r.Apply(ctx, ev); err != nil {
+		t.Fatal(err)
+	}
+	var seen *Device
+	r.OnChange(func(d Device) { seen = &d })
+	if err := r.SetLocationName(ctx, "dradis/p", "Home", 32.1, 34.8, time.Unix(at+5, 0)); err != nil {
+		t.Fatal(err)
+	}
+	d, _ := r.Get(ctx, "dradis/p")
+	if d.LocationName == nil || *d.LocationName != "Home" || *d.LocationNameAt != at+5 || *d.GeocodedLat != 32.1 {
+		t.Fatalf("device %+v", d)
+	}
+	if seen == nil || seen.LocationName == nil {
+		t.Fatal("OnChange not fired")
+	}
+	// A device that moved on meanwhile keeps its old name.
+	if err := r.SetLocationName(ctx, "dradis/p", "Old", 1, 1, time.Unix(at, 0)); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("moved: %v", err)
+	}
+}
+
+func TestLocationNameClearedWhenMovedFar(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	ctx := context.Background()
+	t0 := int64(1700000000)
+	loc := func(lat, lon float64, at int64) {
+		t.Helper()
+		ev := mqtt.Event{Prefix: "dradis", Device: "p", Leaf: mqtt.LeafLocation,
+			Payload: mqtt.Location{Latitude: lat, Longitude: lon, Time: &at}, ReceivedAt: time.Unix(at, 0)}
+		if err := r.Apply(ctx, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	loc(32.1, 34.8, t0)
+	if err := r.SetLocationName(ctx, "dradis/p", "Home", 32.1, 34.8, time.Unix(t0, 0)); err != nil {
+		t.Fatal(err)
+	}
+	loc(32.105, 34.8, t0+10) // ~555 m: keeps the name
+	d, _ := r.Get(ctx, "dradis/p")
+	if d.LocationName == nil || *d.LocationName != "Home" || d.GeocodedLat == nil {
+		t.Fatalf("near move dropped the name: %+v", d)
+	}
+	loc(32.12, 34.8, t0+20) // ~2.2 km: stale
+	d, _ = r.Get(ctx, "dradis/p")
+	if d.LocationName != nil || d.LocationNameAt != nil || d.GeocodedLat != nil || d.GeocodedLon != nil {
+		t.Fatalf("far move kept the name: %+v", d)
+	}
+	if *d.Latitude != 32.12 {
+		t.Fatalf("location not updated: %v", *d.Latitude)
+	}
+}
+
+func TestSetLocationNameEmptyClearsName(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	ctx := context.Background()
+	at := int64(1700000000)
+	apply := func(lat float64, ts int64) {
+		ev := mqtt.Event{Prefix: "dradis", Device: "p", Leaf: mqtt.LeafLocation,
+			Payload: mqtt.Location{Latitude: lat, Longitude: 34.8, Time: &ts}, ReceivedAt: time.Unix(ts, 0)}
+		if err := r.Apply(ctx, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	apply(32.1, at)
+	if err := r.SetLocationName(ctx, "dradis/p", "Home", 32.1, 34.8, time.Unix(at, 0)); err != nil {
+		t.Fatal(err)
+	}
+	apply(32.104, at+1) // within 1000 m: name kept, but for other coordinates
+	if err := r.SetLocationName(ctx, "dradis/p", "", 32.104, 34.8, time.Unix(at+2, 0)); err != nil {
+		t.Fatal(err)
+	}
+	d, _ := r.Get(ctx, "dradis/p")
+	if d.LocationName != nil || d.LocationNameAt == nil || *d.LocationNameAt != at+2 || *d.GeocodedLat != 32.104 {
+		t.Fatalf("device %+v", d)
+	}
+}
