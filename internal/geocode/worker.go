@@ -31,6 +31,14 @@ type Reverser interface {
 	Reverse(ctx context.Context, lat, lon float64) (Result, Info, error)
 }
 
+// Presence tells the worker whether anyone is watching the UI. Provider calls are made only
+// while Subscribers() > 0; OnFirstSubscriber(fn) must call fn (without blocking the caller)
+// when the count goes 0 -> 1. *events.Hub implements it.
+type Presence interface {
+	Subscribers() int
+	OnFirstSubscriber(fn func())
+}
+
 // Worker is the single background goroutine that names device locations.
 type Worker struct {
 	devs   Devices
@@ -41,7 +49,9 @@ type Worker struct {
 	log    *slog.Logger
 	now    func() time.Time
 	wake   chan struct{}
-	failed atomic.Bool // the key was rejected: no more lookups until restart
+	kick   chan struct{} // a viewer appeared: sweep now
+	pres   Presence      // nil means always present
+	failed atomic.Bool   // the key was rejected: no more lookups until restart
 
 	mu    sync.Mutex
 	queue []string            // device keys, oldest first
@@ -57,8 +67,22 @@ func NewWorker(devs Devices, api Reverser, st Store, cfg Config, log *slog.Logge
 		now = time.Now
 	}
 	return &Worker{devs: devs, api: api, store: st, guard: NewGuard(cfg, now), cfg: cfg, log: log, now: now,
-		wake: make(chan struct{}, 1), inQ: map[string]struct{}{}, pending: map[string]struct{}{}}
+		wake: make(chan struct{}, 1), kick: make(chan struct{}, 1), inQ: map[string]struct{}{}, pending: map[string]struct{}{}}
 }
+
+// SetPresence gates provider calls on UI presence (see Presence). Call it before Run.
+func (w *Worker) SetPresence(p Presence) {
+	w.pres = p
+	p.OnFirstSubscriber(func() {
+		select {
+		case w.kick <- struct{}{}:
+		default:
+		}
+	})
+}
+
+// watched reports whether a provider call is allowed right now.
+func (w *Worker) watched() bool { return w.pres == nil || w.pres.Subscribers() > 0 }
 
 // Enqueue is the Registry.OnChange hook. It never blocks: it only queues devices that have
 // a location and look like they need a name, and drops the oldest entry beyond maxQueue.
@@ -203,8 +227,12 @@ func (w *Worker) Run(ctx context.Context) {
 			return
 		case <-w.wake:
 		case <-due:
-		case <-sweepTick.C:
+		case <-w.kick:
 			w.sweep(ctx)
+		case <-sweepTick.C:
+			if w.watched() {
+				w.sweep(ctx)
+			}
 		case <-tick.C:
 			w.purge(ctx)
 		}
@@ -263,6 +291,9 @@ func (w *Worker) process(ctx context.Context, key string) {
 // lookup asks the provider once, if quota allows, and caches the answer. A device the
 // guard refuses is held back until the block lifts.
 func (w *Worker) lookup(ctx context.Context, key, ck string, lat, lon float64, now time.Time) (string, bool) {
+	if !w.watched() { // nobody is looking: the device stays unnamed until the sweep on the next viewer
+		return "", false
+	}
 	day := Day(now)
 	u, err := w.store.Usage(ctx, day)
 	if err != nil {

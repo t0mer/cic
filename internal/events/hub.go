@@ -8,10 +8,11 @@ import (
 
 // Event types published on the hub.
 const (
-	TypeDeviceUpdated = "device.updated"
-	TypeDeviceRemoved = "device.removed"
-	TypeBrokerState   = "broker.state"
-	TypeCommandResult = "command.result"
+	TypeDeviceUpdated  = "device.updated"
+	TypeDeviceRemoved  = "device.removed"
+	TypeDevicesRefresh = "devices.refresh"
+	TypeBrokerState    = "broker.state"
+	TypeCommandResult  = "command.result"
 )
 
 // subscriberBuffer is the per-subscriber channel capacity.
@@ -34,6 +35,7 @@ type Hub struct {
 	closed  bool
 	done    chan struct{}
 	dropped atomic.Uint64
+	onFirst func()
 }
 
 // NewHub returns an empty Hub.
@@ -55,7 +57,12 @@ func (h *Hub) Subscribe() (<-chan Event, func()) {
 	h.nextSub++
 	id := h.nextSub
 	h.subs[id] = ch
+	first := len(h.subs) == 1 && h.onFirst != nil
+	fn := h.onFirst
 	h.mu.Unlock()
+	if first {
+		go fn() // off the caller's goroutine so a slow callback never blocks Subscribe
+	}
 	return ch, func() {
 		h.mu.Lock()
 		defer h.mu.Unlock()
@@ -64,6 +71,22 @@ func (h *Hub) Subscribe() (<-chan Event, func()) {
 			close(c)
 		}
 	}
+}
+
+// Subscribers returns the number of live subscribers. Only the SSE handler subscribes
+// (the outcome relay and registry only Publish), so this is the number of open UI streams.
+func (h *Hub) Subscribers() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.subs)
+}
+
+// OnFirstSubscriber registers fn (replacing any earlier one), run in its own goroutine
+// each time the subscriber count goes from 0 to 1.
+func (h *Hub) OnFirstSubscriber(fn func()) {
+	h.mu.Lock()
+	h.onFirst = fn
+	h.mu.Unlock()
 }
 
 // Publish assigns the next ID and delivers the event to every subscriber

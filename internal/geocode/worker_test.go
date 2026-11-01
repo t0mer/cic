@@ -404,3 +404,71 @@ func TestFailedCallsCountAgainstCap(t *testing.T) {
 		}
 	}
 }
+
+type fakePresence struct {
+	n  atomic.Int32
+	fn func()
+}
+
+func (p *fakePresence) Subscribers() int           { return int(p.n.Load()) }
+func (p *fakePresence) OnFirstSubscriber(f func()) { p.fn = f }
+func (p *fakePresence) join()                      { p.n.Add(1); p.fn() }
+
+func TestNoProviderCallWithoutViewers(t *testing.T) {
+	status := new(atomic.Int32)
+	status.Store(200)
+	e := newEnv(t, status, testCfg)
+	pres := &fakePresence{}
+	e.w.SetPresence(pres)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { e.w.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	e.reg.OnChange(e.w.Enqueue)
+
+	e.locate(t, "p1", 32.0744874, 34.7918382)
+	time.Sleep(200 * time.Millisecond)
+	if got := e.calls.Load(); got != 0 {
+		t.Fatalf("provider called %d times with no viewer", got)
+	}
+	if u, _ := e.w.Usage(ctx); u.CallsToday != 0 {
+		t.Fatalf("call counted: %+v", u)
+	}
+	if d := e.device(t, "p1"); d.LocationName != nil {
+		t.Fatalf("named without a viewer: %v", *d.LocationName)
+	}
+
+	pres.join() // the first viewer arrives: the sweep names the device
+	deadline := time.After(5 * time.Second)
+	for e.device(t, "p1").LocationName == nil {
+		select {
+		case <-deadline:
+			t.Fatal("not named after a viewer joined")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if got := e.calls.Load(); got != 1 {
+		t.Fatalf("calls %d", got)
+	}
+}
+
+func TestCachedNameServedWithoutViewers(t *testing.T) {
+	status := new(atomic.Int32)
+	status.Store(200)
+	e := newEnv(t, status, testCfg)
+	ctx := context.Background()
+	e.locate(t, "a", 32.0744874, 34.7918382)
+	e.w.process(ctx, "dradis/a") // viewer-less default: nil presence, fills the cache
+	if e.calls.Load() != 1 {
+		t.Fatalf("calls %d", e.calls.Load())
+	}
+	e.locate(t, "b", 32.0744874, 34.7918382) // same cache cell
+	e.w.SetPresence(&fakePresence{})
+	e.w.process(ctx, "dradis/b")
+	if e.calls.Load() != 1 {
+		t.Fatalf("provider called without viewer: %d", e.calls.Load())
+	}
+	if e.device(t, "b").LocationName == nil {
+		t.Fatal("cached name not applied")
+	}
+}

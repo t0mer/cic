@@ -107,3 +107,59 @@ func TestConcurrent(t *testing.T) {
 	wg.Wait()
 	h.Close()
 }
+
+func TestSubscribersAndFirstSubscriber(t *testing.T) {
+	h := NewHub()
+	fired := make(chan struct{}, 4)
+	h.OnFirstSubscriber(func() { fired <- struct{}{} })
+	if h.Subscribers() != 0 {
+		t.Fatal("want 0")
+	}
+	_, c1 := h.Subscribe()
+	<-fired
+	_, c2 := h.Subscribe() // 1 -> 2: no callback
+	if h.Subscribers() != 2 {
+		t.Fatalf("subscribers %d", h.Subscribers())
+	}
+	c1()
+	c1() // idempotent
+	c2()
+	if h.Subscribers() != 0 {
+		t.Fatalf("subscribers %d", h.Subscribers())
+	}
+	_, c3 := h.Subscribe() // 0 -> 1 again
+	defer c3()
+	<-fired
+	select {
+	case <-fired:
+		t.Fatal("callback fired more than once per 0->1")
+	default:
+	}
+}
+
+func TestOnFirstSubscriberDoesNotBlock(t *testing.T) {
+	h := NewHub()
+	block := make(chan struct{})
+	h.OnFirstSubscriber(func() { <-block })
+	defer close(block)
+	_, c := h.Subscribe() // must return although the callback blocks
+	defer c()
+	h.Publish(TypeBrokerState, 1)
+}
+
+func TestFirstSubscriberRace(t *testing.T) {
+	h := NewHub()
+	h.OnFirstSubscriber(func() {})
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, c := h.Subscribe()
+			h.Publish(TypeBrokerState, 1)
+			_ = h.Subscribers()
+			c()
+		}()
+	}
+	wg.Wait()
+}
