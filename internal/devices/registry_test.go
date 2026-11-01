@@ -572,3 +572,59 @@ func TestSetLocationNameEmptyClearsName(t *testing.T) {
 		t.Fatalf("device %+v", d)
 	}
 }
+
+func pointCount(t *testing.T, r *Registry) int {
+	t.Helper()
+	var n int
+	if err := r.db.QueryRow(`SELECT COUNT(*) FROM location_points`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func TestOnLocationHook(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	type call struct {
+		key      string
+		ts       int64
+		lat, lon float64
+		acc      *float64
+	}
+	var got []call
+	r.OnLocation(func(key string, ts int64, lat, lon float64, acc *float64) {
+		got = append(got, call{key, ts, lat, lon, acc})
+	})
+	fix := t0.Unix() - 100
+	mustApply(t, r, ev(mqtt.LeafBattery, t0, mqtt.Battery{Level: new(9)}))
+	mustApply(t, r, ev(mqtt.LeafLocation, t0, mqtt.Location{Latitude: 32, Longitude: 34, GPSAccuracy: new(5.0), Time: &fix}))
+	older := fix - 50
+	mustApply(t, r, ev(mqtt.LeafLocation, t0, mqtt.Location{Latitude: 33, Longitude: 35, Time: &older})) // stale
+	mustApply(t, r, ev(mqtt.LeafLocation, t0, mqtt.Location{Latitude: 34, Longitude: 36}))               // no fix time: receipt time
+	if len(got) != 2 {
+		t.Fatalf("hook calls = %+v", got)
+	}
+	if got[0].key != "dradis/phone1" || got[0].ts != fix || got[0].lat != 32 || got[0].acc == nil || *got[0].acc != 5 {
+		t.Errorf("first call = %+v", got[0])
+	}
+	if got[1].ts != t0.Unix() {
+		t.Errorf("second call ts = %d", got[1].ts)
+	}
+}
+
+func TestDeleteRemovesLocationPoints(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	ctx := context.Background()
+	mustApply(t, r, ev(mqtt.LeafStatus, t0, mqtt.Status{Online: true}))
+	mustApply(t, r, mqtt.Event{Prefix: "dradis", Device: "other", Leaf: mqtt.LeafStatus, ReceivedAt: t0, Payload: mqtt.Status{Online: true}})
+	for _, k := range []string{"dradis/phone1", "dradis/other"} {
+		if _, err := r.db.Exec(`INSERT INTO location_points(device_key, ts, lat, lon) VALUES (?, 1, 1, 1)`, k); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.Delete(ctx, "dradis/phone1"); err != nil {
+		t.Fatal(err)
+	}
+	if n := pointCount(t, r); n != 1 {
+		t.Fatalf("points after delete = %d, want 1 (only the other device's)", n)
+	}
+}

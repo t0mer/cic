@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -20,16 +21,17 @@ import (
 
 // Config is the complete application configuration.
 type Config struct {
-	Server   ServerConfig   `mapstructure:"server"`
-	Storage  StorageConfig  `mapstructure:"storage"`
-	MQTT     MQTTConfig     `mapstructure:"mqtt"`
-	Devices  DevicesConfig  `mapstructure:"devices"`
-	Commands CommandsConfig `mapstructure:"commands"`
-	Geocode  GeocodeConfig  `mapstructure:"geocode"`
-	Map      MapConfig      `mapstructure:"map"`
-	Auth     AuthConfig     `mapstructure:"auth"`
-	Audit    AuditConfig    `mapstructure:"audit"`
-	Log      LogConfig      `mapstructure:"log"`
+	Server    ServerConfig    `mapstructure:"server"`
+	Storage   StorageConfig   `mapstructure:"storage"`
+	MQTT      MQTTConfig      `mapstructure:"mqtt"`
+	Devices   DevicesConfig   `mapstructure:"devices"`
+	Commands  CommandsConfig  `mapstructure:"commands"`
+	Geocode   GeocodeConfig   `mapstructure:"geocode"`
+	Map       MapConfig       `mapstructure:"map"`
+	Auth      AuthConfig      `mapstructure:"auth"`
+	Audit     AuditConfig     `mapstructure:"audit"`
+	Locations LocationsConfig `mapstructure:"locations"`
+	Log       LogConfig       `mapstructure:"log"`
 }
 
 // ServerConfig configures the HTTP server.
@@ -118,6 +120,15 @@ type AuditConfig struct {
 	Retention time.Duration `mapstructure:"retention"`
 }
 
+// LocationsConfig configures the location history recorder.
+type LocationsConfig struct {
+	Enabled            bool          `mapstructure:"enabled"`
+	Retention          time.Duration `mapstructure:"retention"`
+	MinDistanceM       float64       `mapstructure:"min_distance_m"`
+	MinInterval        time.Duration `mapstructure:"min_interval"`
+	MaxPointsPerDevice int           `mapstructure:"max_points_per_device"`
+}
+
 // LogConfig configures logging.
 type LogConfig struct {
 	Level  string `mapstructure:"level"`
@@ -176,6 +187,11 @@ func newViper() *viper.Viper {
 		"auth.oidc.client_secret":          "",
 		"auth.oidc.allowed_emails":         []string{},
 		"audit.retention":                  2160 * time.Hour,
+		"locations.enabled":                true,
+		"locations.retention":              2160 * time.Hour,
+		"locations.min_distance_m":         25.0,
+		"locations.min_interval":           5 * time.Minute,
+		"locations.max_points_per_device":  200000,
 		"log.level":                        "info",
 		"log.format":                       "text",
 	} {
@@ -259,6 +275,18 @@ func (c *Config) Validate() error {
 	}
 	if c.Audit.Retention <= 0 {
 		c.Audit.Retention = 2160 * time.Hour // never "keep forever": the audit table must not grow unbounded
+	}
+	if c.Locations.Retention <= 0 {
+		c.Locations.Retention = 2160 * time.Hour // never "keep forever": the table must not grow unbounded
+	}
+	if l := c.Locations; l.MinDistanceM < 0 || math.IsNaN(l.MinDistanceM) {
+		errs = append(errs, fmt.Errorf("locations.min_distance_m %v must not be negative", l.MinDistanceM))
+	}
+	if c.Locations.MinInterval < 0 {
+		errs = append(errs, fmt.Errorf("locations.min_interval %s must not be negative", c.Locations.MinInterval))
+	}
+	if c.Locations.MaxPointsPerDevice < 0 {
+		errs = append(errs, fmt.Errorf("locations.max_points_per_device %d must not be negative", c.Locations.MaxPointsPerDevice))
 	}
 	if c.Devices.OfflineAfter <= 0 {
 		errs = append(errs, fmt.Errorf("devices.offline_after %s must be greater than 0", c.Devices.OfflineAfter))

@@ -87,12 +87,18 @@ func (k *keyedMutex) lock(key string) (unlock func()) {
 // writeLimiter allows each admin settingsWritesPerMin writes per minute (sliding window).
 type writeLimiter struct {
 	mu   sync.Mutex
+	max  int
 	now  func() time.Time
 	hits map[int64][]time.Time
 }
 
 func newWriteLimiter(now func() time.Time) *writeLimiter {
-	return &writeLimiter{now: now, hits: map[int64][]time.Time{}}
+	return newLimiter(now, settingsWritesPerMin)
+}
+
+// newLimiter allows each user max requests per minute.
+func newLimiter(now func() time.Time, max int) *writeLimiter {
+	return &writeLimiter{now: now, max: max, hits: map[int64][]time.Time{}}
 }
 
 // allow records a write by user and reports whether it is within the limit; otherwise it
@@ -103,7 +109,7 @@ func (l *writeLimiter) allow(user int64) (bool, int) {
 	now := l.now()
 	cut := now.Add(-time.Minute)
 	h := slices.DeleteFunc(l.hits[user], func(t time.Time) bool { return !t.After(cut) })
-	if len(h) >= settingsWritesPerMin {
+	if len(h) >= l.max {
 		l.hits[user] = h
 		return false, max(1, int(h[0].Add(time.Minute).Sub(now).Seconds()+1))
 	}
@@ -134,6 +140,7 @@ func (s *server) settingsRoutes(r chi.Router) {
 	r.Get("/users", s.listUsers)
 	r.Get("/geocode/usage", s.geocodeUsage)
 	r.Get("/places", s.listPlaces)
+	s.historyRoutes(r)
 	r.Group(func(r chi.Router) {
 		r.Use(s.limitWrites)
 		r.Patch("/devices/{prefix}/{device}", s.patchDevice)

@@ -33,7 +33,7 @@ func TestUIConfig(t *testing.T) {
 				if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
 					t.Fatal(err)
 				}
-				if len(raw) != 2 {
+				if len(raw) != 3 {
 					t.Fatalf("unexpected top-level keys: %s", rec.Body)
 				}
 				var body struct {

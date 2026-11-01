@@ -9,6 +9,7 @@ import { ActivityPage } from '@/features/activity/ActivityPage'
 import { AuthGate } from '@/features/auth/AuthGate'
 import { AuthProvider } from '@/features/auth/AuthProvider'
 import { DevicesPage } from '@/features/devices/DevicesPage'
+import { HistoryPage } from '@/features/history/HistoryPage'
 import { AppShell } from '@/features/shell/AppShell'
 import { SettingsPage } from '@/features/settings/SettingsPage'
 
@@ -58,6 +59,7 @@ const router = createBrowserRouter([
           </ErrorBoundary>
         ),
       },
+      { path: '/devices/:prefix/:device/history', element: <HistoryPage /> },
       { path: '/activity', element: <ActivityPage /> },
       { path: '/settings', element: <SettingsPage /> },
       { path: '*', element: <Navigate to="/devices" replace /> },

@@ -127,6 +127,8 @@ export interface UiConfig {
     attribution: string
   }
   geocode_enabled: boolean
+  /** Whether location history is recorded and served. */
+  history_enabled: boolean
 }
 
 export interface AdminUser {
@@ -173,3 +175,35 @@ export interface Place {
 }
 
 export type PlaceInput = Omit<Place, 'id'>
+
+/** One recorded location. `t` is unix seconds. */
+export interface HistoryPoint {
+  t: number
+  lat: number
+  lon: number
+  accuracy: number | null
+}
+
+export interface HistoryResponse {
+  points: HistoryPoint[]
+  /** True when the server returned only a sample of the points in the range. */
+  truncated: boolean
+}
+
+/** `[lat, lon, t]` with `t` in unix seconds. */
+export type RoutePoint = [lat: number, lon: number, t: number]
+
+export interface RouteDay {
+  /** YYYY-MM-DD in the requested time zone. */
+  date: string
+  distance_m: number
+  point_count: number
+  /** Unix seconds of the first and last point of the day. */
+  first: number
+  last: number
+  segments: RoutePoint[][]
+}
+
+export interface RoutesResponse {
+  days: RouteDay[]
+}

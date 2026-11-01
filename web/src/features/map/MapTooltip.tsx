@@ -1,6 +1,7 @@
 import { BatteryFull, BatteryLow, ExternalLink, MapPin, Zap } from 'lucide-react'
 
 import { useAuth } from '@/features/auth/auth-context'
+import { HistoryLink } from '@/features/history/HistoryLink'
 import { PingControl } from '@/features/commands/PingControl'
 import { PlacePrefix } from '@/features/devices/PlaceBadge'
 import { describeLocation } from '@/lib/location'
@@ -104,6 +105,7 @@ export function MapTooltip({
       </p>
       <div className="flex flex-wrap items-center gap-1.5">
         {isAdmin ? <PingControl device={device} onConfirmOpenChange={onConfirmOpenChange} /> : null}
+        {isAdmin ? <HistoryLink device={device} /> : null}
         {view.kind !== 'unknown' && device.latitude !== null && device.longitude !== null ? (
           <a
             href={googleMapsUrl(device.latitude, device.longitude)}

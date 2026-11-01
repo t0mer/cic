@@ -78,6 +78,7 @@ type Registry struct {
 	hooks        []func(Device)
 	annotate     func(*Device)
 	removeHooks  []func(Device)
+	locHooks     []func(key string, ts int64, lat, lon float64, accuracy *float64)
 	refreshHooks []func()
 }
 
@@ -129,6 +130,14 @@ func (r *Registry) OnChange(fn func(Device)) {
 func (r *Registry) OnRemove(fn func(Device)) {
 	r.mu.Lock()
 	r.removeHooks = append(r.removeHooks, fn)
+	r.mu.Unlock()
+}
+
+// OnLocation registers fn to be called, synchronously after the commit, for every location
+// update that was applied (not for stale fixes). ts is the phone's own fix time. Keep fn quick.
+func (r *Registry) OnLocation(fn func(key string, ts int64, lat, lon float64, accuracy *float64)) {
+	r.mu.Lock()
+	r.locHooks = append(r.locHooks, fn)
 	r.mu.Unlock()
 }
 
@@ -186,16 +195,20 @@ func (r *Registry) Apply(ctx context.Context, ev mqtt.Event) error {
 	}
 	inserted, _ := res.RowsAffected()
 
+	var applied *mqtt.Location
 	if loc, ok := ev.Payload.(mqtt.Location); ok {
 		if stale, err := staleLocation(ctx, tx, key, locationTime(ev, loc)); err != nil {
 			return err
 		} else if stale {
 			r.log.Debug("stale location ignored", "device", key, "location_time", locationTime(ev, loc))
 			set, args = "", nil
-		} else if far, err := movedFarFromName(ctx, tx, key, loc.Latitude, loc.Longitude); err != nil {
-			return err
-		} else if far {
-			set += `, location_name = NULL, location_name_at = NULL, geocoded_lat = NULL, geocoded_lon = NULL`
+		} else {
+			applied = &loc
+			if far, err := movedFarFromName(ctx, tx, key, loc.Latitude, loc.Longitude); err != nil {
+				return err
+			} else if far {
+				set += `, location_name = NULL, location_name_at = NULL, geocoded_lat = NULL, geocoded_lon = NULL`
+			}
 		}
 	}
 	parts, args := withLiveness(ev, set, args, seen)
@@ -214,6 +227,14 @@ func (r *Registry) Apply(ctx context.Context, ev mqtt.Event) error {
 		return fmt.Errorf("committing update of device %q: %w", key, err)
 	}
 	r.notify(ctx, key)
+	if applied != nil {
+		r.mu.RLock()
+		hooks := slices.Clone(r.locHooks)
+		r.mu.RUnlock()
+		for _, fn := range hooks {
+			fn(key, locationTime(ev, *applied), applied.Latitude, applied.Longitude, applied.GPSAccuracy)
+		}
+	}
 	return nil
 }
 
@@ -502,12 +523,24 @@ func (r *Registry) UpdateProfile(ctx context.Context, key string, p ProfilePatch
 // Delete removes a device and calls the OnRemove hooks; it reappears on its next message.
 // The row is read and deleted in one statement, so the hooks see the state that was removed.
 func (r *Registry) Delete(ctx context.Context, key string) error {
-	d, err := r.scan(r.db.QueryRowContext(ctx, `DELETE FROM devices WHERE key = ? RETURNING `+columns, key))
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("starting delete of device %q: %w", key, err)
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after commit
+	d, err := r.scan(tx.QueryRowContext(ctx, `DELETE FROM devices WHERE key = ? RETURNING `+columns, key))
 	if errors.Is(err, sql.ErrNoRows) {
 		return store.ErrNotFound
 	}
 	if err != nil {
 		return fmt.Errorf("deleting device %q: %w", key, err)
+	}
+	// The recorded location history goes with the device, atomically.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM location_points WHERE device_key = ?`, key); err != nil {
+		return fmt.Errorf("deleting location history of device %q: %w", key, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing delete of device %q: %w", key, err)
 	}
 	r.mu.RLock()
 	hooks := slices.Clone(r.removeHooks)

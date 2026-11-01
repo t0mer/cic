@@ -3,6 +3,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -90,6 +91,10 @@ type Deps struct {
 	// Auth authenticates every /api request except POST /api/auth/login. Required.
 	Auth *auth.Service
 
+	// History is the database the location history routes read. Nil means no history is
+	// available: the routes answer an empty result.
+	History *sql.DB
+
 	// UI is the browser-facing configuration served by GET /api/ui-config.
 	UI UIConfig
 
@@ -115,7 +120,7 @@ func New(d Deps) http.Handler {
 	}
 	r := chi.NewRouter()
 	r.Use(limitBody)
-	s := &server{Deps: d, writes: newWriteLimiter(time.Now)}
+	s := &server{Deps: d, writes: newWriteLimiter(time.Now), reads: newLimiter(time.Now, historyReadsPerMin)}
 	r.Mount("/auth", d.Auth.Routes())
 	// Everything else needs a session. Handlers that mutate state or touch settings
 	// add auth.RequireRole(auth.RoleAdmin) in their own group.
@@ -234,6 +239,7 @@ func limitBody(next http.Handler) http.Handler {
 type server struct {
 	Deps
 	writes *writeLimiter
+	reads  *writeLimiter // location history reads, per admin
 	// devLocks serialises "write the row, then publish" per device key.
 	devLocks keyedMutex
 	// warnedTypes remembers unrecognised event payload types already logged by viewerView.
@@ -334,6 +340,8 @@ type UIConfig struct {
 	StyleDark      string
 	Attribution    string
 	GeocodeEnabled bool
+	// HistoryEnabled tells the browser the location history recorder is on.
+	HistoryEnabled bool
 	// MapOrigins are the https origins added to the CSP (see SecurityHeaders); not served.
 	MapOrigins []string
 }
@@ -348,6 +356,7 @@ type uiConfigMap struct {
 type uiConfigView struct {
 	Map            uiConfigMap `json:"map"`
 	GeocodeEnabled bool        `json:"geocode_enabled"`
+	HistoryEnabled bool        `json:"history_enabled"`
 }
 
 func (s *server) uiConfig(w http.ResponseWriter, _ *http.Request) {
@@ -355,6 +364,7 @@ func (s *server) uiConfig(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, uiConfigView{
 		Map:            uiConfigMap{Provider: u.Provider, StyleLight: u.StyleLight, StyleDark: u.StyleDark, Attribution: u.Attribution},
 		GeocodeEnabled: u.GeocodeEnabled,
+		HistoryEnabled: u.HistoryEnabled,
 	})
 }
 

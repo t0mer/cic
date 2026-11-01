@@ -7,6 +7,7 @@ import type {
   Device,
   DevicePatch,
   GeocodeUsage,
+  HistoryResponse,
   ErrorCode,
   LoginResponse,
   SessionView,
@@ -15,6 +16,7 @@ import type {
   Me,
   Place,
   PlaceInput,
+  RoutesResponse,
   UiConfig,
 } from './types'
 import { parseUiConfig } from './ui-config'
@@ -154,6 +156,29 @@ async function request<T>(url: string, opts: RequestOptions = {}): Promise<T> {
 }
 
 export const fetchDevices = () => request<Device[]>('/api/devices')
+const deviceUrl = (prefix: string, device: string) =>
+  `/api/devices/${encodeURIComponent(prefix)}/${encodeURIComponent(device)}`
+
+/** Admin-only. `from`/`to` are RFC3339; the server allows at most 31 days. */
+export const fetchHistory = (
+  prefix: string,
+  device: string,
+  q: { from: string; to: string; limit: number },
+) =>
+  request<HistoryResponse>(
+    `${deviceUrl(prefix, device)}/history?${new URLSearchParams({ from: q.from, to: q.to, limit: String(q.limit) })}`,
+  )
+
+/** Admin-only. Days are split in the IANA zone `tz`. */
+export const fetchRoutes = (
+  prefix: string,
+  device: string,
+  q: { from: string; to: string; tz: string },
+) =>
+  request<RoutesResponse>(
+    `${deviceUrl(prefix, device)}/routes?${new URLSearchParams({ from: q.from, to: q.to, tz: q.tz })}`,
+  )
+
 export const fetchBroker = () => request<Broker>('/api/broker')
 export const fetchUiConfig = async (): Promise<UiConfig> =>
   parseUiConfig(await request<unknown>('/api/ui-config'))
