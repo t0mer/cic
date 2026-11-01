@@ -19,6 +19,11 @@ jobs:
       - name: Placeholder UI so go:embed compiles
         run: test -f internal/webui/dist/.gitkeep
       - run: go vet ./cmd/... ./internal/...
+      - name: Cross-compile check (windows)
+        run: |
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=windows GOARCH=$arch go build -trimpath -o "$RUNNER_TEMP/cic_windows_$arch.exe" ./cmd/cic
+          done
       - run: go test -race -count=1 ./cmd/... ./internal/...
       - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./cmd/... ./internal/...
 
