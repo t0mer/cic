@@ -19,8 +19,8 @@ export interface Device {
   location_time: number | null
   /** Reverse-geocoded place name, or null when not (yet) resolved. */
   location_name: string | null
-  /** RFC3339 time the name was resolved. */
-  location_name_at: string | null
+  /** Unix seconds the name was resolved. */
+  location_name_at: number | null
   device_info: string | null
   screen_locked: boolean | null
   last_seen: number
@@ -136,6 +136,7 @@ export interface GeocodeUsage {
   calls_today: number
   cache_hits_today: number
   remaining: number | null
+  last_remaining?: number | null
   daily_cap: number
   blocked_until: string | null
   cache_hit_ratio: number

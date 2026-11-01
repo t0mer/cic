@@ -25,6 +25,7 @@ import (
 	"github.com/t0mer/cic/internal/config"
 	"github.com/t0mer/cic/internal/devices"
 	"github.com/t0mer/cic/internal/events"
+	"github.com/t0mer/cic/internal/geocode"
 	"github.com/t0mer/cic/internal/mqtt"
 	"github.com/t0mer/cic/internal/store"
 	"github.com/t0mer/cic/internal/version"
@@ -134,6 +135,14 @@ func runServe(parent context.Context, cfg *config.Config) error {
 	deps := api.Deps{Devices: registry, DB: db, Hub: hub, Log: log, Auth: authSvc, Audit: auditLog, UI: uiConfig(cfg)}
 	if cfg.GeocodeKeyIsPublic() {
 		log.Error("geocode disabled: the configured key is a public maps key; set the LatLng server key (latlng_…) in CIC_GEOCODE_API_KEY and put the pk_ key in CIC_MAP_LATLNG_MAPS_KEY")
+	}
+	if cfg.GeocodeUsable() {
+		gw := geocode.NewWorker(registry, geocode.NewClient("", cfg.Geocode.APIKey), geocode.Store{DB: db},
+			geocode.Config{MinMoveMeters: cfg.Geocode.MinMoveMeters, MaxAge: cfg.Geocode.MaxAge,
+				DailyCap: cfg.Geocode.DailyCap, Reserve: cfg.Geocode.Reserve}, log, nil)
+		registry.OnChange(gw.Enqueue) // before the MQTT client starts
+		deps.Geocode = gw
+		go gw.Run(ctx)
 	}
 	var publisher commands.Publisher = noBroker{}
 

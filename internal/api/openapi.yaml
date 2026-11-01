@@ -507,6 +507,22 @@ paths:
               schema: { $ref: "#/components/schemas/UIConfig" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+  /api/geocode/usage:
+    get:
+      summary: Reverse-geocoding usage today (UTC)
+      description: >
+        Administrators only. Counts provider calls and cache hits of the current UTC day.
+        `remaining` is the smaller of the local daily cap minus calls and the provider's last
+        reported remaining quota. `blocked_until` is set while lookups are paused after a 429.
+        When geocoding is not configured, `enabled` is false and the counters are zero.
+      responses:
+        "200":
+          description: Usage.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GeocodeUsage" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /api/events:
     get:
       summary: Server-Sent Events stream
@@ -626,6 +642,18 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
   schemas:
+    GeocodeUsage:
+      type: object
+      required: [enabled, calls_today, cache_hits_today, daily_cap, remaining, last_remaining, blocked_until, cache_hit_ratio]
+      properties:
+        enabled: { type: boolean }
+        calls_today: { type: integer }
+        cache_hits_today: { type: integer }
+        daily_cap: { type: integer }
+        remaining: { type: integer, description: "min(daily_cap - calls_today, last_remaining when known)" }
+        last_remaining: { type: integer, nullable: true, description: "Provider X-RateLimit-Remaining at the last call today" }
+        blocked_until: { type: string, format: date-time, nullable: true }
+        cache_hit_ratio: { type: number, description: "cache_hits / (calls + cache_hits) today, 0 when none" }
     LoginRequest:
       type: object
       required: [username, password]
@@ -820,6 +848,8 @@ components:
         longitude: { type: number, nullable: true }
         gps_accuracy: { type: number, nullable: true }
         location_time: { type: integer, format: int64, nullable: true }
+        location_name: { type: string, nullable: true, description: "Reverse-geocoded place name of the last fix; null while unresolved or when geocoding is off" }
+        location_name_at: { type: integer, format: int64, nullable: true, description: "Unix seconds the name was resolved" }
         device_info: { type: string, nullable: true }
         screen_locked: { type: boolean, nullable: true }
         last_seen: { type: integer, format: int64 }

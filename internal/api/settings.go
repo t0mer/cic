@@ -18,6 +18,7 @@ import (
 	"github.com/t0mer/cic/internal/auth"
 	"github.com/t0mer/cic/internal/devices"
 	"github.com/t0mer/cic/internal/events"
+	"github.com/t0mer/cic/internal/geocode"
 	"github.com/t0mer/cic/internal/mqtt"
 	"github.com/t0mer/cic/internal/store"
 )
@@ -131,6 +132,7 @@ func (s *server) limitWrites(next http.Handler) http.Handler {
 
 func (s *server) settingsRoutes(r chi.Router) {
 	r.Get("/users", s.listUsers)
+	r.Get("/geocode/usage", s.geocodeUsage)
 	r.Group(func(r chi.Router) {
 		r.Use(s.limitWrites)
 		r.Patch("/devices/{prefix}/{device}", s.patchDevice)
@@ -169,6 +171,20 @@ func noStorePassword(w http.ResponseWriter) {
 func (s *server) internalError(w http.ResponseWriter, what string, err error) {
 	s.log().Error(what, "err", err)
 	writeCmdError(w, http.StatusInternalServerError, codeUnavailable, "internal error")
+}
+
+// geocodeUsage reports today's lookups and quota; it carries no key or coordinates.
+func (s *server) geocodeUsage(w http.ResponseWriter, r *http.Request) {
+	if s.Geocode == nil {
+		writeJSON(w, http.StatusOK, geocode.Usage{})
+		return
+	}
+	u, err := s.Geocode.Usage(r.Context())
+	if err != nil {
+		s.internalError(w, "reading geocode usage", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, u)
 }
 
 // ---- devices ----

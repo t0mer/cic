@@ -20,6 +20,7 @@ import (
 	"github.com/t0mer/cic/internal/auth"
 	"github.com/t0mer/cic/internal/devices"
 	"github.com/t0mer/cic/internal/events"
+	"github.com/t0mer/cic/internal/geocode"
 	"github.com/t0mer/cic/internal/mqtt"
 	"github.com/t0mer/cic/internal/store"
 )
@@ -48,6 +49,11 @@ type DeviceStore interface {
 	OnRemove(fn func(devices.Device))
 }
 
+// GeocodeUsage reports today's reverse-geocoding counters.
+type GeocodeUsage interface {
+	Usage(ctx context.Context) (geocode.Usage, error)
+}
+
 // BrokerState reports the MQTT connection state.
 type BrokerState interface {
 	State() mqtt.State
@@ -70,6 +76,9 @@ type Deps struct {
 	// Commands runs device commands (admin only). Nil means no broker is configured:
 	// the command routes still exist and answer 503 not_connected.
 	Commands Commander
+	// Geocode reports reverse-geocoding usage (GET /api/geocode/usage, admin only). Nil
+	// means geocoding is off: the route answers enabled=false.
+	Geocode GeocodeUsage
 	// Audit stores and lists command attempts (GET /api/activity, admin only).
 	Audit ActivityLog
 
