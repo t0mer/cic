@@ -13,7 +13,7 @@ afterEach(() => {
 
 describe('twoFactorError', () => {
   it('maps statuses to friendly text', () => {
-    expect(twoFactorError(new ApiError(401, 'x'))).toBe('Incorrect password or code.')
+    expect(twoFactorError(new ApiError(401, 'invalid code'))).toBe('Incorrect password or code.')
     expect(twoFactorError(new ApiError(429, 'x', null, 5))).toContain('5s')
     expect(twoFactorError(new Error('boom'))).toBe('Something went wrong. Try again.')
   })
@@ -43,5 +43,18 @@ describe('TwoFactorSection', () => {
         code: '123456',
       }),
     )
+  })
+})
+
+describe('twoFactorError messages', () => {
+  it('only wrong-credential 401s read as incorrect password or code', () => {
+    expect(twoFactorError(new ApiError(401, 'invalid credentials'))).toBe(
+      'Incorrect password or code.',
+    )
+    expect(twoFactorError(new ApiError(401, 'invalid code'))).toBe('Incorrect password or code.')
+    expect(twoFactorError(new ApiError(401, 'authentication required'))).toBe(
+      'Something went wrong. Try again.',
+    )
+    expect(twoFactorError(new ApiError(500, 'x'))).toBe('Something went wrong. Try again.')
   })
 })

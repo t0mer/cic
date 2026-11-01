@@ -367,7 +367,7 @@ export async function mockApi(
     if (path.startsWith('/api/auth/2fa')) {
       const tf = state.twoFactor
       const b = (body ?? {}) as { current_password?: string; code?: string }
-      const badPw = () => r.fulfill({ status: 401, json: { error: 'invalid password' } })
+      const badPw = () => r.fulfill({ status: 401, json: { error: 'invalid credentials' } })
       if (method === 'GET')
         return r.fulfill({
           json: { enabled: tf.enabled, backup_codes_remaining: tf.backupCodes.length },

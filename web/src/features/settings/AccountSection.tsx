@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { FieldError, Input, Label } from '@/components/ui/field'
 import { passwordProblem, serverMessage } from '@/features/auth/ChangePasswordPage'
+import { confirmLeave } from '@/lib/leave-guard'
 import { useAuth } from '@/features/auth/auth-context'
 import { MIN_PASSWORD } from '@/lib/validation'
 import { TwoFactorSection } from './TwoFactorSection'
@@ -116,7 +117,11 @@ export function AccountSection() {
       </dl>
       <PasswordForm />
       <TwoFactorSection />
-      <Button variant="outline" className="h-11 w-fit px-5" onClick={() => void logout()}>
+      <Button
+        variant="outline"
+        className="h-11 w-fit px-5"
+        onClick={() => confirmLeave() && void logout()}
+      >
         <LogOut aria-hidden="true" />
         Sign out
       </Button>
