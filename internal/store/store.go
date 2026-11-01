@@ -87,23 +87,65 @@ func normalizePath(goos, path string) (string, error) {
 	if goos != "windows" {
 		return path, nil
 	}
+	prefixed := false
 	switch {
 	case len(path) >= 8 && strings.EqualFold(path[:8], `\\?\UNC\`):
-		path = `\\` + path[8:]
+		path, prefixed = `\\`+path[8:], true
 	case strings.HasPrefix(path, `\\?\`), strings.HasPrefix(path, `\\.\`):
 		rest := path[4:]
 		// Only drive-letter paths are supported behind the prefix; volume GUIDs, device and
 		// pipe names would otherwise turn into a meaningless relative path.
-		if len(rest) < 3 || !isLetter(rest[0]) || rest[1] != ':' || (rest[2] != '\\' && rest[2] != '/') {
+		if len(rest) < 3 || !isLetter(rest[0]) || rest[1] != ':' || rest[2] != '\\' {
 			return "", fmt.Errorf("database path %q is not supported: use a drive-letter or UNC path", path)
 		}
-		path = rest
+		path, prefixed = rest, true
 	}
 	if strings.ContainsAny(path, "?*\"<>|") {
 		return "", fmt.Errorf("database path %q contains characters that are not valid in a Windows file name", path)
 	}
+	if prefixed {
+		// Behind the prefix Windows takes names literally; without it the path is normalized,
+		// which would change the meaning of '/', '.', '..' and names ending in '.' or ' '.
+		if strings.Contains(path, "/") {
+			return "", fmt.Errorf("database path %q: '/' is not a separator in an extended-length path; use '\\'", path)
+		}
+		if strings.Contains(path[2:], `\\`) { // empty component (the leading pair of a UNC path excepted)
+			return "", fmt.Errorf("database path %q has an empty component that Windows would collapse without the extended-length prefix", path)
+		}
+		for _, part := range strings.Split(path, `\`) {
+			if part == "." || part == ".." || (part != "" && (strings.HasSuffix(part, ".") || strings.HasSuffix(part, " "))) || reservedDOSName(part) {
+				return "", fmt.Errorf("database path %q has a component (%q) that Windows would read differently without the extended-length prefix", path, part)
+			}
+		}
+	}
+	// SQLite's default Windows VFS limits path names to about 1040 bytes (MAX_PATH*4 in UTF-8;
+	// relative paths are resolved inside SQLite, so a long working directory is not covered).
+	// Refuse longer paths early with a clear message; the limit is applied after the prefix is
+	// stripped.
+	if len(path) > maxWindowsPath {
+		return "", fmt.Errorf("database path is %d bytes long; the maximum supported on Windows is %d", len(path), maxWindowsPath)
+	}
 	return path, nil
 }
+
+// reservedDOSName reports whether a path component names a DOS device (CON, PRN, AUX, NUL,
+// COM1-9, LPT1-9, with or without an extension): behind the extended-length prefix such a name
+// is an ordinary file, without it Windows opens the device.
+func reservedDOSName(part string) bool {
+	base := part
+	if i := strings.IndexByte(base, '.'); i >= 0 {
+		base = base[:i]
+	}
+	base = strings.ToUpper(strings.TrimRight(base, " "))
+	switch base {
+	case "CON", "PRN", "AUX", "NUL":
+		return true
+	}
+	return len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) && base[3] >= '1' && base[3] <= '9'
+}
+
+// maxWindowsPath keeps well below SQLite's 1040-byte Windows VFS pathname limit.
+const maxWindowsPath = 1000
 
 // busy_timeout must come first: pragmas run in order on every new connection, and
 // switching to WAL takes a lock that fails at once (SQLITE_BUSY) without a busy handler.
