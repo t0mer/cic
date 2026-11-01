@@ -586,13 +586,14 @@ func TestOnLocationHook(t *testing.T) {
 	r, _ := newTestRegistry(t)
 	type call struct {
 		key      string
+		inc      int64
 		ts       int64
 		lat, lon float64
 		acc      *float64
 	}
 	var got []call
-	r.OnLocation(func(key string, ts int64, lat, lon float64, acc *float64) {
-		got = append(got, call{key, ts, lat, lon, acc})
+	r.OnLocation(func(key string, inc int64, ts int64, lat, lon float64, acc *float64) {
+		got = append(got, call{key, inc, ts, lat, lon, acc})
 	})
 	fix := t0.Unix() - 100
 	mustApply(t, r, ev(mqtt.LeafBattery, t0, mqtt.Battery{Level: new(9)}))
@@ -605,6 +606,9 @@ func TestOnLocationHook(t *testing.T) {
 	}
 	if got[0].key != "dradis/phone1" || got[0].ts != fix || got[0].lat != 32 || got[0].acc == nil || *got[0].acc != 5 {
 		t.Errorf("first call = %+v", got[0])
+	}
+	if got[0].inc <= 0 || got[1].inc != got[0].inc {
+		t.Errorf("incarnations = %d, %d; want equal and positive", got[0].inc, got[1].inc)
 	}
 	if got[1].ts != t0.Unix() {
 		t.Errorf("second call ts = %d", got[1].ts)

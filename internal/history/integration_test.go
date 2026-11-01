@@ -2,6 +2,7 @@ package history_test
 
 import (
 	"context"
+	"database/sql"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -132,5 +133,85 @@ func TestFirstFixOfNewDeviceIsStored(t *testing.T) {
 	drain()
 	if count(t) != 1 {
 		t.Fatalf("first fix of a new device: %d rows", count(t))
+	}
+}
+
+// writeAll drains the writer, then lists the stored fix times.
+func storedTimes(t *testing.T, db interface {
+	Query(string, ...any) (*sql.Rows, error)
+}) (out []int64) {
+	t.Helper()
+	rows, err := db.Query(`SELECT ts FROM location_points ORDER BY ts`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ts int64
+		if err := rows.Scan(&ts); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, ts)
+	}
+	return
+}
+
+func TestSameSecondDeleteAndRecreateRejectsOldFix(t *testing.T) {
+	ctx, reg, _, count, drain := setupReg(t)
+	now := time.Now()
+	old, fresh := now.Add(-2*time.Hour), now.Add(-time.Hour)
+	// Everything happens at the same ReceivedAt second.
+	ev := func(ts time.Time) mqtt.Event {
+		u := ts.Unix()
+		return mqtt.Event{Prefix: "dradis", Device: "p1", Leaf: mqtt.LeafLocation, ReceivedAt: now,
+			Payload: mqtt.Location{Latitude: 32, Longitude: 34, Time: &u}}
+	}
+	if err := reg.Apply(ctx, ev(old)); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Delete(ctx, "dradis/p1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Apply(ctx, ev(fresh)); err != nil {
+		t.Fatal(err)
+	}
+	drain()
+	if count(t) != 1 {
+		t.Fatalf("rows = %d, want only the new incarnation's fix", count(t))
+	}
+}
+
+func TestMigrationKeepsExistingDevicesRecordable(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "cic.db")
+	db, err := store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	// A device row as it existed before migration 0013 (incarnation defaults to 0).
+	if _, err := db.Exec(`INSERT INTO devices(key, prefix, device, last_seen, created_at) VALUES ('dradis/old', 'dradis', 'old', 0, 0)`); err != nil {
+		t.Fatal(err)
+	}
+	var inc int64
+	if err := db.QueryRow(`SELECT incarnation FROM devices WHERE key = 'dradis/old'`).Scan(&inc); err != nil || inc != 0 {
+		t.Fatalf("incarnation %d err %v", inc, err)
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	reg := devices.NewRegistry(db, 5*time.Minute, log)
+	rec := history.New(db, history.Config{Retention: 24 * time.Hour, MinDistanceM: 25, MinInterval: 5 * time.Minute}, log)
+	reg.OnLocation(rec.OnLocation)
+	ts := time.Now().Add(-time.Hour).Unix()
+	if err := reg.Apply(ctx, mqtt.Event{Prefix: "dradis", Device: "old", Leaf: mqtt.LeafLocation, ReceivedAt: time.Now(),
+		Payload: mqtt.Location{Latitude: 32, Longitude: 34, Time: &ts}}); err != nil {
+		t.Fatal(err)
+	}
+	wctx, stop := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { rec.RunWriter(wctx); close(done) }()
+	stop()
+	<-done
+	if got := storedTimes(t, db); len(got) != 1 || got[0] != ts {
+		t.Fatalf("stored %v, want [%d]", got, ts)
 	}
 }

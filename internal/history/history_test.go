@@ -337,7 +337,7 @@ func TestOnLocationNeverBlocksAndDropsOldest(t *testing.T) {
 	r.queueSize = 4
 	start := time.Now()
 	for i := range 10 { // no writer running: the queue is full from the 5th fix on
-		r.OnLocation(key, int64(100+i), 1, 1, nil)
+		r.OnLocation(key, 0, int64(100+i), 1, 1, nil)
 	}
 	if time.Since(start) > time.Second {
 		t.Fatal("OnLocation blocked")
@@ -365,12 +365,12 @@ func TestWriterOrderDrainAndRetry(t *testing.T) {
 		return nil
 	}
 	for i := int64(1); i <= 50; i++ {
-		r.OnLocation(key, i, 1, 1, nil) // queued before the writer starts
+		r.OnLocation(key, 0, i, 1, 1, nil) // queued before the writer starts
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { r.RunWriter(ctx); close(done) }()
-	r.OnLocation(key, 51, 1, 1, nil)
+	r.OnLocation(key, 0, 51, 1, 1, nil)
 	cancel() // shutdown must flush what is queued
 	<-done
 	mu.Lock()
@@ -415,7 +415,7 @@ func TestShutdownDuringWriteKeepsTheFix(t *testing.T) {
 		return nil
 	}
 	for i := int64(1); i <= 4; i++ {
-		r.OnLocation(key, i, 1, 1, nil)
+		r.OnLocation(key, 0, i, 1, 1, nil)
 	}
 	r.drain(ctx)
 	got := queued(r)
@@ -432,55 +432,137 @@ func TestQueueStaysBoundedAfterRequeue(t *testing.T) {
 		r.queue = append(r.queue, fix{key: key, ts: i})
 	}
 	r.qmu.Unlock()
-	r.OnLocation(key, 6, 1, 1, nil)
+	r.OnLocation(key, 0, 6, 1, 1, nil)
 	if got := queued(r); len(got) != 3 || got[2] != 6 {
 		t.Fatalf("queue = %v, want 3 entries ending in 6", got)
 	}
 }
 
-func TestForgetRemovesOnlyThatKeysQueuedFixes(t *testing.T) {
+func TestForgetKeepsQueuedFixes(t *testing.T) {
 	r, _ := newRec(t, cfg())
-	r.OnLocation(key, 100, 1, 1, nil)
-	r.OnLocation("dradis/other", 101, 1, 1, nil)
-	r.OnLocation(key, 102, 1, 1, nil)
+	r.OnLocation(key, 0, 100, 1, 1, nil)
+	r.OnLocation("dradis/other", 0, 101, 1, 1, nil)
 	r.Forget(key)
-	if got := queued(r); len(got) != 1 || got[0] != 101 {
+	if got := queued(r); len(got) != 2 {
 		t.Fatalf("queue after Forget: %v", got)
 	}
 }
 
-func TestFixInFlightDuringForgetIsRejected(t *testing.T) {
-	r, count := newRec(t, cfg())
-	ts := t0.Unix() - 60
-	r.OnLocation(key, ts, 32, 34, nil)
-	r.OnLocation("dradis/other", ts, 32, 34, nil)
-	forgotten := false
-	r.write = func(ctx context.Context, f fix) error {
-		if f.key == key && !forgotten {
-			forgotten = true
-			r.Forget(key) // the delete lands after the fix left the queue, before its insert
-		}
-		return r.record(ctx, f)
+// recreate deletes and recreates key with a fresh incarnation, as Registry does, and returns it.
+func recreate(t *testing.T, r *Recorder, inc int64) {
+	t.Helper()
+	if _, err := r.db.Exec(`DELETE FROM devices WHERE key = ?`, key); err != nil {
+		t.Fatal(err)
 	}
-	r.drain(context.Background())
-	if count() != 1 {
-		t.Fatalf("expected only the other device's fix, got %d rows", count())
-	}
-	r.OnLocation(key, ts+1, 32, 34, nil) // the new incarnation is recorded
-	r.drain(context.Background())
-	if count() != 2 {
-		t.Fatalf("new incarnation fix lost: %d rows", count())
+	if _, err := r.db.Exec(`INSERT INTO devices(key, prefix, device, last_seen, created_at, incarnation) VALUES (?, 'dradis', 'p', 0, 0, ?)`, key, inc); err != nil {
+		t.Fatal(err)
 	}
 }
 
-func TestFixQueuedBeforeRecreateIsRejectedByCreatedAt(t *testing.T) {
+func TestInFlightOldIncarnationFixIsRejectedBeforeForget(t *testing.T) {
 	r, count := newRec(t, cfg())
-	r.OnLocation(key, t0.Unix()-60, 32, 34, nil) // enqueued at t0, no Forget (hook not run yet)
-	if _, err := r.db.Exec(`UPDATE devices SET created_at = ? WHERE key = ?`, t0.Unix()+10, key); err != nil {
-		t.Fatal(err)
+	ts := t0.Unix() - 60
+	r.OnLocation(key, 0, ts, 32, 34, nil)
+	r.beforeInsert = func() { recreate(t, r, 7) } // delete+recreate commits just before the insert
+	r.drain(context.Background())                 // Forget has not run yet
+	if count() != 0 {
+		t.Fatalf("old incarnation fix stored: %d rows", count())
+	}
+}
+
+func TestNewIncarnationFixQueuedBeforeForgetSurvives(t *testing.T) {
+	r, count := newRec(t, cfg())
+	ts := t0.Unix() - 60
+	r.OnLocation(key, 0, ts, 32, 34, nil) // old incarnation
+	recreate(t, r, 7)
+	r.OnLocation(key, 7, ts+1, 32, 34, nil) // new incarnation, queued before the OnRemove hook
+	r.Forget(key)
+	if got := queued(r); len(got) != 2 {
+		t.Fatalf("Forget removed queued fixes: %v", got)
 	}
 	r.drain(context.Background())
-	if count() != 0 {
-		t.Fatalf("pre-recreate fix stored: %d rows", count())
+	var n int
+	if err := r.db.QueryRow(`SELECT COUNT(*) FROM location_points WHERE ts = ?`, ts+1).Scan(&n); err != nil || n != 1 || count() != 1 {
+		t.Fatalf("rows: new=%d total=%d err=%v", n, count(), err)
+	}
+}
+
+func TestStaleFixAppendedAfterForgetDoesNotCostAValidOne(t *testing.T) {
+	r, count := newRec(t, cfg())
+	ts := t0.Unix() - 60
+	recreate(t, r, 7)
+	r.Forget(key)
+	r.OnLocation(key, 0, ts, 32, 34, nil)   // stale, appended after Forget
+	r.OnLocation(key, 7, ts+1, 32, 34, nil) // valid: the queue has room, nothing is evicted
+	if r.Dropped() != 0 {
+		t.Fatalf("dropped %d", r.Dropped())
+	}
+	r.drain(context.Background())
+	if count() != 1 {
+		t.Fatalf("expected exactly the valid fix, got %d rows", count())
+	}
+	// At capacity a stale fix occupies a slot like any other and the oldest fix is dropped; the
+	// stale one itself is still never stored.
+	r.queueSize = 2
+	r.OnLocation(key, 7, ts+2, 32, 34, nil)
+	r.OnLocation(key, 0, ts+3, 32, 34, nil)
+	r.OnLocation(key, 7, ts+100, 33, 34, nil) // moved far: not thinned; evicts ts+2
+	if r.Dropped() != 1 {
+		t.Fatalf("dropped %d, want 1", r.Dropped())
+	}
+	r.drain(context.Background())
+	if count() != 2 {
+		t.Fatalf("rows = %d, want 2 (stale fix must not be stored)", count())
+	}
+}
+
+func TestCachedPointOfOldIncarnationIsNotUsedForThinning(t *testing.T) {
+	r, count := newRec(t, cfg())
+	ts := t0.Unix() - 600
+	rec(t, r, key, ts, 32, 34)
+	recreate(t, r, 7)
+	// Same place, 1 s later: would be thinned against the predecessor's cached point.
+	if err := r.record(context.Background(), fix{key: key, inc: 7, ts: ts + 1, lat: 32, lon: 34}); err != nil {
+		t.Fatal(err)
+	}
+	if count() != 1 {
+		t.Fatalf("rows = %d, want 1", count())
+	}
+}
+
+// A rejected stale fix must not wipe the cache of the device that is current now, and must not
+// leave its own incarnation tag on a point loaded from the database.
+func TestStaleFixLeavesTheCurrentDevicesCacheAlone(t *testing.T) {
+	r, count := newRec(t, cfg())
+	var cur int64
+	if err := r.db.QueryRow(`SELECT incarnation FROM devices WHERE key = ?`, key).Scan(&cur); err != nil {
+		t.Fatal(err)
+	}
+	now := t0.Unix()
+	if err := r.record(context.Background(), fix{key: key, inc: cur, ts: now - 100, lat: 1, lon: 1}); err != nil {
+		t.Fatal(err)
+	}
+	r.mu.Lock()
+	before := r.last[key]
+	r.mu.Unlock()
+	if before.inc != cur {
+		t.Fatalf("cache entry tagged %d, want %d", before.inc, cur)
+	}
+	// stale fix of another incarnation, far away so it is not thinned
+	if err := r.record(context.Background(), fix{key: key, inc: cur + 1, ts: now - 50, lat: 40, lon: 40}); err != nil {
+		t.Fatal(err)
+	}
+	r.mu.Lock()
+	after, ok := r.last[key]
+	ins := r.inserts[key]
+	r.mu.Unlock()
+	if ok && after.inc != cur {
+		t.Fatalf("a stale fix left its own incarnation on the cache: %+v", after)
+	}
+	if ins != 1 {
+		t.Fatalf("insert counter of the current device was reset: %d", ins)
+	}
+	if n := count(); n != 1 {
+		t.Fatalf("points = %d, want 1", n)
 	}
 }
