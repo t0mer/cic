@@ -143,6 +143,15 @@ func (r *Recorder) record(ctx context.Context, f fix) error {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// A fix of another incarnation is rejected before it can touch the cache: it must neither
+	// evict the current device's cached point nor label a point reloaded from the database.
+	var current bool
+	if err := r.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM devices WHERE key = ? AND incarnation = ?)`, key, f.inc).Scan(&current); err != nil {
+		return fmt.Errorf("checking device %q: %w", key, err)
+	}
+	if !current {
+		return nil
+	}
 	last, ok := r.last[key]
 	if ok && last.inc != f.inc {
 		// The cached point is of another incarnation of the key: never thin against it.
@@ -202,8 +211,8 @@ func (r *Recorder) record(ctx context.Context, f fix) error {
 			}
 			// The insert counter belongs to the key's current device; reset it only when no
 			// device with this key exists any more.
-			var any bool
-			if err := r.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM devices WHERE key = ?)`, key).Scan(&any); err == nil && !any {
+			var keyExists bool
+			if err := r.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM devices WHERE key = ?)`, key).Scan(&keyExists); err == nil && !keyExists {
 				delete(r.inserts, key)
 			}
 		}
