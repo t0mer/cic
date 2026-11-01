@@ -454,6 +454,10 @@ func recreate(t *testing.T, r *Recorder, inc int64) {
 	if _, err := r.db.Exec(`DELETE FROM devices WHERE key = ?`, key); err != nil {
 		t.Fatal(err)
 	}
+	// Registry.Delete removes the device's history in the same transaction.
+	if _, err := r.db.Exec(`DELETE FROM location_points WHERE device_key = ?`, key); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := r.db.Exec(`INSERT INTO devices(key, prefix, device, last_seen, created_at, incarnation) VALUES (?, 'dradis', 'p', 0, 0, ?)`, key, inc); err != nil {
 		t.Fatal(err)
 	}
@@ -528,6 +532,10 @@ func TestCachedPointOfOldIncarnationIsNotUsedForThinning(t *testing.T) {
 	if count() != 1 {
 		t.Fatalf("rows = %d, want 1", count())
 	}
+	var stored int
+	if err := r.db.QueryRow(`SELECT COUNT(*) FROM location_points WHERE device_key = ? AND ts = ?`, key, ts+1).Scan(&stored); err != nil || stored != 1 {
+		t.Fatalf("the new incarnation's fix was not stored (found %d, err %v)", stored, err)
+	}
 }
 
 // A rejected stale fix must not wipe the cache of the device that is current now, and must not
@@ -556,8 +564,8 @@ func TestStaleFixLeavesTheCurrentDevicesCacheAlone(t *testing.T) {
 	after, ok := r.last[key]
 	ins := r.inserts[key]
 	r.mu.Unlock()
-	if ok && after.inc != cur {
-		t.Fatalf("a stale fix left its own incarnation on the cache: %+v", after)
+	if !ok || after.inc != cur || after.ts != before.ts {
+		t.Fatalf("the current device's cache entry was evicted or relabelled: %+v ok=%v (before %+v)", after, ok, before)
 	}
 	if ins != 1 {
 		t.Fatalf("insert counter of the current device was reset: %d", ins)
