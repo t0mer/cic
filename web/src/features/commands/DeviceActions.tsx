@@ -1,33 +1,31 @@
-import { BellRing, Check, MessageSquareText, MoreVertical, Radio, Square } from 'lucide-react'
-import { AlertDialog, DropdownMenu } from 'radix-ui'
+import { BellRing, MessageSquareText, MoreVertical, Palette, Trash2 } from 'lucide-react'
+import { DropdownMenu } from 'radix-ui'
 import { useCallback, useState } from 'react'
 import { toast } from 'sonner'
 
 import { Button } from '@/components/ui/button'
+import { DeviceDeleteDialog } from '@/features/settings/DeviceDeleteDialog'
+import { DeviceEditDialog } from '@/features/settings/DeviceEditDialog'
 import type { Device } from '@/lib/types'
 import { NotifyDialog } from './NotifyDialog'
+import { PingControl } from './PingControl'
 import { SmsDialog } from './SmsDialog'
 import { SMS_TRACKED_MAX, SmsStatusList } from './SmsStatus'
 import { useCommand, useFlag } from './useCommand'
 
-export const PING_SENT_MS = 2000
-export const PING_STOP_MS = 3000
 /** After an unknown outcome the same action stays disabled this long. */
 export const UNKNOWN_HOLD_MS = 30_000
 
-const actionBtn = 'h-11 min-w-11 gap-1.5 px-2 aria-disabled:opacity-60'
+import { actionBtn } from './styles'
 
 export function DeviceActions({ device }: { device: Device }) {
   const name = device.full_name || device.device
-  const ping = useCommand(device, 'ping')
-  const stop = useCommand(device, 'ping/stop')
   const refreshStatus = useCommand(device, 'refresh-status')
   const refreshLocation = useCommand(device, 'refresh-location')
-  const [sent, flashSent] = useFlag(PING_SENT_MS)
-  const [stopVisible, showStop, hideStop] = useFlag(PING_STOP_MS)
-  const [confirmOffline, setConfirmOffline] = useState(false)
   const [notifyOpen, setNotifyOpen] = useState(false)
   const [smsOpen, setSmsOpen] = useState(false)
+  const [editOpen, setEditOpen] = useState(false)
+  const [deleteOpen, setDeleteOpen] = useState(false)
   const [smsIds, setSmsIds] = useState<string[]>([])
   const [smsHold, holdSms, releaseSms] = useFlag(UNKNOWN_HOLD_MS)
   const [notifyHold, holdNotify, releaseNotify] = useFlag(UNKNOWN_HOLD_MS)
@@ -44,66 +42,10 @@ export function DeviceActions({ device }: { device: Device }) {
     releaseNotify()
   }
 
-  const doPing = () => {
-    if (ping.isPending) return
-    ping.mutate(
-      {},
-      {
-        onSuccess: () => {
-          flashSent()
-          showStop()
-          toast.success(`Ping sent to ${name}`)
-        },
-      },
-    )
-  }
-
-  const offline = !device.online
-  const onPing = () => {
-    if (offline) setConfirmOffline(true)
-    else doPing()
-  }
-
   return (
     <div className="flex flex-col gap-2" data-testid="device-actions">
       <div className="flex flex-wrap items-center gap-1.5">
-        <Button
-          variant="outline"
-          className={actionBtn}
-          onClick={onPing}
-          disabled={ping.isPending}
-          aria-disabled={offline ? true : undefined}
-          aria-describedby={offline ? `offline-${device.key}` : undefined}
-          title={offline ? 'Device is offline. You can still send the ping.' : undefined}
-          aria-label={`Ping ${name}`}
-        >
-          {sent ? <Check aria-hidden="true" /> : <Radio aria-hidden="true" />}
-          {sent ? 'Sent' : 'Ping'}
-        </Button>
-        {offline ? (
-          <span id={`offline-${device.key}`} className="sr-only">
-            Device is offline. Activating asks for confirmation before sending.
-          </span>
-        ) : null}
-        {stopVisible ? (
-          <Button
-            variant="secondary"
-            className={actionBtn}
-            onClick={() =>
-              stop.mutate(undefined, {
-                onSuccess: () => {
-                  hideStop()
-                  toast.success(`Ping stopped on ${name}`)
-                },
-              })
-            }
-            disabled={stop.isPending}
-            aria-label={`Stop ping on ${name}`}
-          >
-            <Square aria-hidden="true" />
-            Stop
-          </Button>
-        ) : null}
+        <PingControl device={device} />
         <Button
           variant="outline"
           className={actionBtn}
@@ -164,6 +106,21 @@ export function DeviceActions({ device }: { device: Device }) {
               >
                 Refresh location
               </DropdownMenu.Item>
+              <DropdownMenu.Separator className="my-1 h-px bg-border" />
+              <DropdownMenu.Item
+                onSelect={() => setEditOpen(true)}
+                className="flex h-11 cursor-default items-center gap-2 rounded-sm px-3 text-sm outline-none data-[highlighted]:bg-accent"
+              >
+                <Palette className="size-4" aria-hidden="true" />
+                Edit name/color…
+              </DropdownMenu.Item>
+              <DropdownMenu.Item
+                onSelect={() => setDeleteOpen(true)}
+                className="flex h-11 cursor-default items-center gap-2 rounded-sm px-3 text-sm text-destructive outline-none data-[highlighted]:bg-accent"
+              >
+                <Trash2 className="size-4" aria-hidden="true" />
+                Delete…
+              </DropdownMenu.Item>
             </DropdownMenu.Content>
           </DropdownMenu.Portal>
         </DropdownMenu.Root>
@@ -188,32 +145,6 @@ export function DeviceActions({ device }: { device: Device }) {
 
       <SmsStatusList ids={smsIds} onFinished={removeSms} />
 
-      <AlertDialog.Root open={confirmOffline} onOpenChange={setConfirmOffline}>
-        <AlertDialog.Portal>
-          <AlertDialog.Overlay className="fixed inset-0 z-50 bg-black/60" />
-          <AlertDialog.Content className="fixed inset-x-0 top-1/2 z-50 mx-auto flex w-[calc(100%-2rem)] max-w-sm -translate-y-1/2 flex-col gap-4 rounded-xl border bg-background p-6 shadow-lg outline-none">
-            <AlertDialog.Title className="text-lg font-semibold">
-              Device is offline
-            </AlertDialog.Title>
-            <AlertDialog.Description dir="auto" className="text-sm text-muted-foreground">
-              {name} has not been seen recently, so the ping may not arrive. Send it anyway?
-            </AlertDialog.Description>
-            <div className="flex flex-col gap-2 sm:flex-row-reverse">
-              <AlertDialog.Action asChild>
-                <Button className="h-11 sm:flex-1" onClick={doPing}>
-                  Send anyway
-                </Button>
-              </AlertDialog.Action>
-              <AlertDialog.Cancel asChild>
-                <Button variant="outline" className="h-11 sm:flex-1">
-                  Cancel
-                </Button>
-              </AlertDialog.Cancel>
-            </div>
-          </AlertDialog.Content>
-        </AlertDialog.Portal>
-      </AlertDialog.Root>
-
       <NotifyDialog
         device={device}
         open={notifyOpen}
@@ -223,6 +154,8 @@ export function DeviceActions({ device }: { device: Device }) {
           holdNotify()
         }}
       />
+      <DeviceEditDialog device={device} open={editOpen} onOpenChange={setEditOpen} />
+      <DeviceDeleteDialog device={device} open={deleteOpen} onOpenChange={setDeleteOpen} />
       <SmsDialog
         device={device}
         open={smsOpen}

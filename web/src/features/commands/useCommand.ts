@@ -15,6 +15,8 @@ interface CommandOptions {
   onAck?: (ack: CommandAck) => void
   /** Runs when the outcome is unknown: the command MAY still be delivered. */
   onUnknown?: () => void
+  /** Runs after success or failure (mutation-level, so it also survives an unmount). */
+  onSettled?: () => void
 }
 
 /** One mutation per button, so each button disables only while its own request is in flight. */
@@ -26,6 +28,7 @@ export function useCommand(device: Device, action: CommandAction, opts: CommandO
       return ack
     },
     onSuccess: (ack) => opts.onAck?.(ack),
+    onSettled: () => opts.onSettled?.(),
     onError: (err) => {
       const msg = commandErrorMessage(err)
       if (isOutcomeUnknown(err)) {
