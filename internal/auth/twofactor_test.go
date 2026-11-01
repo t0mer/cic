@@ -286,31 +286,31 @@ func TestMFATokenBoundToUser(t *testing.T) {
 
 func TestMFAChallengeCaps(t *testing.T) {
 	m := newMFAStore(time.Now)
-	victim, _ := m.issue(1)
+	victim, _ := m.issue(1, 0)
 	// one account flooding itself keeps only its newest mfaMaxPerUser challenges
-	first, _ := m.issue(2)
+	first, _ := m.issue(2, 0)
 	for i := 0; i < 3*mfaMaxPerUser; i++ {
-		if _, err := m.issue(2); err != nil {
+		if _, err := m.issue(2, 0); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, ok := m.peek(first); ok {
+	if _, _, ok := m.peek(first); ok {
 		t.Fatal("user's oldest challenge should have been dropped")
 	}
-	if _, ok := m.peek(victim); !ok {
+	if _, _, ok := m.peek(victim); !ok {
 		t.Fatal("another user's challenge was evicted")
 	}
 	// at the global cap new challenges are refused, nobody is evicted
 	m = newMFAStore(time.Now)
-	victim, _ = m.issue(1)
+	victim, _ = m.issue(1, 0)
 	now := time.Now()
 	for u := int64(2); len(m.m) < mfaMaxPending; u++ {
 		m.m[mfaKey(string(rune(u))+"x")] = &challenge{userID: u, created: now, expires: now.Add(mfaTTL)}
 	}
-	if _, err := m.issue(999_999); err != errMFAFull {
+	if _, err := m.issue(999_999, 0); err != errMFAFull {
 		t.Fatalf("want errMFAFull, got %v", err)
 	}
-	if _, ok := m.peek(victim); !ok || len(m.m) != mfaMaxPending {
+	if _, _, ok := m.peek(victim); !ok || len(m.m) != mfaMaxPending {
 		t.Fatal("full store evicted a challenge")
 	}
 }

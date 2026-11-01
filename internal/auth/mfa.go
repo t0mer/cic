@@ -26,6 +26,7 @@ var errMFAFull = errors.New("too many pending second-factor logins")
 
 type challenge struct {
 	userID  int64
+	gen     int64 // users.auth_gen when issued
 	expires time.Time
 	created time.Time
 	tries   int
@@ -52,7 +53,7 @@ func mfaKey(token string) string {
 // mfaMaxPerUser live challenges: a newer one drops that user's oldest, so one account can
 // never push out another's. At the global cap (after pruning expired ones) it refuses with
 // errMFAFull rather than evicting anybody.
-func (m *mfaStore) issue(userID int64) (string, error) {
+func (m *mfaStore) issue(userID, gen int64) (string, error) {
 	b := make([]byte, mfaTokenBytes)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
@@ -81,19 +82,19 @@ func (m *mfaStore) issue(userID int64) (string, error) {
 	} else if len(m.m) >= mfaMaxPending {
 		return "", errMFAFull
 	}
-	m.m[mfaKey(token)] = &challenge{userID: userID, created: now, expires: now.Add(mfaTTL)}
+	m.m[mfaKey(token)] = &challenge{userID: userID, gen: gen, created: now, expires: now.Add(mfaTTL)}
 	return token, nil
 }
 
-// peek returns the user of a live challenge.
-func (m *mfaStore) peek(token string) (int64, bool) {
+// peek returns the user and auth generation of a live challenge.
+func (m *mfaStore) peek(token string) (userID, gen int64, ok bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	c := m.liveLocked(mfaKey(token))
 	if c == nil {
-		return 0, false
+		return 0, 0, false
 	}
-	return c.userID, true
+	return c.userID, c.gen, true
 }
 
 func (m *mfaStore) liveLocked(k string) *challenge {

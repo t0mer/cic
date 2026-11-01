@@ -23,7 +23,7 @@ func (s *Service) login2FA(w http.ResponseWriter, r *http.Request) {
 	}
 	const expired = "login expired, sign in again"
 	ipKey := ipPrefix + limiterIP(ClientIP(r, s.trusted))
-	uid, ok := s.mfa.peek(req.Token)
+	uid, gen, ok := s.mfa.peek(req.Token)
 	if !ok {
 		// Unknown token: charge the source address only, so token spraying is slowed.
 		att, wait := s.limiter.Begin(ipKey)
@@ -44,7 +44,7 @@ func (s *Service) login2FA(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	if err != nil || u.Disabled || !u.TOTPEnabled {
+	if err != nil || u.Disabled || !u.TOTPEnabled || u.AuthGen != gen {
 		s.mfa.drop(req.Token)
 		writeError(w, http.StatusUnauthorized, expired)
 		return
@@ -86,7 +86,7 @@ func (s *Service) login2FA(w http.ResponseWriter, r *http.Request) {
 	if f == FactorBackup {
 		s.auditEvent(r.Context(), u.Username, "2fa_login", "factor=backup_code")
 	}
-	s.startSession(w, r, u, false)
+	s.startSession(w, r, u, false, u.AuthGen)
 }
 
 // twoFAServerError answers a non-verdict failure: 503 without a key, 500 otherwise. A
@@ -201,7 +201,7 @@ func (s *Service) twoFAEnable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer att.Cancel()
-	codes, err := s.store.EnableTOTP(r.Context(), u.ID, req.Code, s.now())
+	codes, err := s.store.EnableTOTPRevoking(r.Context(), u.ID, req.Code, s.now(), sess.IDHash)
 	switch {
 	case err == nil:
 	case errors.Is(err, ErrBadCode):
@@ -216,9 +216,6 @@ func (s *Service) twoFAEnable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	att.Success(key)
-	if err := s.store.DeleteOtherSessions(r.Context(), u.ID, sess.IDHash); err != nil {
-		s.log.Error("revoking other sessions", "err", err)
-	}
 	s.auditEvent(r.Context(), u.Username, "2fa_enabled", "")
 	noStore(w)
 	writeJSON(w, http.StatusOK, map[string]any{"backup_codes": codes})
@@ -242,14 +239,11 @@ func (s *Service) twoFADisable(w http.ResponseWriter, r *http.Request) {
 	if !s.checkSecondFactor(w, r, att, u, req.Code) {
 		return
 	}
-	if err := s.store.DisableTOTP(r.Context(), u.ID); err != nil {
+	if err := s.store.DisableTOTPRevoking(r.Context(), u.ID, sess.IDHash); err != nil {
 		s.twoFAServerError(w, r, "disabling totp", err)
 		return
 	}
 	att.Success(key)
-	if err := s.store.DeleteOtherSessions(r.Context(), u.ID, sess.IDHash); err != nil {
-		s.log.Error("revoking other sessions", "err", err)
-	}
 	s.auditEvent(r.Context(), u.Username, "2fa_disabled", "")
 	noStore(w)
 	w.WriteHeader(http.StatusNoContent)

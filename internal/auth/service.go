@@ -449,7 +449,7 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 	// u was read before the (slow) password check, so two-factor may have been enabled in
 	// the meantime. The insert itself re-checks the flag; a lost race turns into a challenge,
 	// so the attempt is only settled afterwards (a challenge must not clear failure counters).
-	if !s.startSession(w, r, u, true) {
+	if !s.startSession(w, r, u, true, -1) {
 		s.challenge(w, att, u)
 		return
 	}
@@ -466,7 +466,7 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 // limited on the same user:/ip: keys.
 func (s *Service) challenge(w http.ResponseWriter, att *Attempt, u User) {
 	att.Cancel()
-	token, err := s.mfa.issue(u.ID)
+	token, err := s.mfa.issue(u.ID, u.AuthGen)
 	if errors.Is(err, errMFAFull) {
 		w.Header().Set("Retry-After", "30")
 		writeError(w, http.StatusServiceUnavailable, "too many sign-ins in progress, try again shortly")
@@ -484,13 +484,17 @@ func (s *Service) challenge(w http.ResponseWriter, att *Attempt, u User) {
 // answers with the session view. With only2FAOff it creates the session only while the
 // account still has no second factor and reports false, having written nothing, when
 // two-factor was enabled in the meantime.
-func (s *Service) startSession(w http.ResponseWriter, r *http.Request, u User, only2FAOff bool) bool {
+func (s *Service) startSession(w http.ResponseWriter, r *http.Request, u User, only2FAOff bool, gen int64) bool {
 	if c, err := r.Cookie(s.CookieName()); err == nil {
 		_ = s.store.DeleteSession(r.Context(), c.Value) // never reuse a pre-login session
 	}
-	token, sess, err := s.store.createSession(r.Context(), u.ID, r.UserAgent(), only2FAOff)
+	token, sess, err := s.store.createSession(r.Context(), u.ID, r.UserAgent(), only2FAOff, gen)
 	if errors.Is(err, ErrSecondFactorRequired) {
 		return false
+	}
+	if errors.Is(err, errAuthChanged) {
+		writeError(w, http.StatusUnauthorized, "login expired, sign in again")
+		return true
 	}
 	if err != nil {
 		s.log.Error("creating session", "err", err)

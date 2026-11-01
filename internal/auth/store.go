@@ -53,6 +53,9 @@ var (
 
 	// ErrTooManyStreams is returned by Watch when a user already has MaxStreamsPerUser streams.
 	ErrTooManyStreams = errors.New("too many open event streams")
+
+	// errAuthChanged means the account's security state changed after a login began.
+	errAuthChanged = errors.New("account security state changed")
 )
 
 const usernamePattern = `^[A-Za-z0-9._-]{3,64}$`
@@ -71,7 +74,8 @@ type User struct {
 	Disabled           bool
 	CreatedAt          time.Time
 	LastLogin          *time.Time
-	TOTPEnabled        bool // two-factor login is on
+	TOTPEnabled        bool  // two-factor login is on
+	AuthGen            int64 // bumped by every account-security change; binds MFA challenges
 }
 
 // Session is a server-side login session.
@@ -97,6 +101,7 @@ type Store struct {
 
 	afterLoginRead  func() // test seam: runs in createSession just before the insert
 	afterEnableRead func() // test seam: runs in EnableTOTP between the read and the write
+	beforeRevoke    func() // test seam: runs just before other sessions are deleted
 }
 
 // watcher is one open event stream bound to a session.
@@ -143,6 +148,20 @@ func (s *Store) endWatchers(userID int64, idHash string) {
 	}
 }
 
+// endOtherWatchers signals every stream of a user except the one bound to keepIDHash
+// (empty keeps none). Matching by user, not by a previously listed set, also ends streams
+// of sessions created while a revocation was running.
+func (s *Store) endOtherWatchers(userID int64, keepIDHash string) {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	for w := range s.watchers {
+		if w.userID == userID && w.idHash != keepIDHash {
+			close(w.ch)
+			delete(s.watchers, w)
+		}
+	}
+}
+
 // NewStore returns a Store on db. now may be nil (time.Now); tests inject a clock.
 func NewStore(db *sql.DB, now func() time.Time) *Store {
 	if now == nil {
@@ -159,7 +178,7 @@ func b2i(b bool) int {
 	return 0
 }
 
-const userCols = `id, username, role, must_change_password, disabled, created_at, last_login, totp_enabled`
+const userCols = `id, username, role, must_change_password, disabled, created_at, last_login, totp_enabled, auth_gen`
 
 type scanner interface{ Scan(...any) error }
 
@@ -169,7 +188,7 @@ func scanUser(sc scanner, extra ...any) (User, error) {
 	var must, dis, totp int
 	var created int64
 	var last sql.NullInt64
-	dest := append([]any{&u.ID, &u.Username, &role, &must, &dis, &created, &last, &totp}, extra...)
+	dest := append([]any{&u.ID, &u.Username, &role, &must, &dis, &created, &last, &totp, &u.AuthGen}, extra...)
 	if err := sc.Scan(dest...); err != nil {
 		return User{}, err
 	}
@@ -268,7 +287,7 @@ func (s *Store) setHash(ctx context.Context, userID int64, hash string, mustChan
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck
-	res, err := tx.ExecContext(ctx, `UPDATE users SET password_hash = ?, must_change_password = ? WHERE id = ?`, hash, b2i(mustChange), userID)
+	res, err := tx.ExecContext(ctx, `UPDATE users SET password_hash = ?, must_change_password = ?, auth_gen = auth_gen + 1 WHERE id = ?`, hash, b2i(mustChange), userID)
 	if err != nil {
 		return fmt.Errorf("updating password: %w", err)
 	}
@@ -337,12 +356,13 @@ func trimUA(ua string) string {
 
 // CreateSession starts a session and returns its secret token (shown only once).
 func (s *Store) CreateSession(ctx context.Context, userID int64, userAgent string) (token string, sess Session, err error) {
-	return s.createSession(ctx, userID, userAgent, false)
+	return s.createSession(ctx, userID, userAgent, false, -1)
 }
 
 // createSession is CreateSession; with only2FAOff it inserts only while the user has no
-// second factor and returns ErrSecondFactorRequired otherwise.
-func (s *Store) createSession(ctx context.Context, userID int64, userAgent string, only2FAOff bool) (token string, sess Session, err error) {
+// second factor and returns ErrSecondFactorRequired otherwise. A gen >= 0 additionally
+// requires users.auth_gen to still equal gen (errAuthChanged otherwise).
+func (s *Store) createSession(ctx context.Context, userID int64, userAgent string, only2FAOff bool, gen int64) (token string, sess Session, err error) {
 	if token, err = randToken(32); err != nil {
 		return "", Session{}, err
 	}
@@ -360,12 +380,16 @@ func (s *Store) createSession(ctx context.Context, userID int64, userAgent strin
 	// before two-factor was enabled cannot slip a password-only session in afterwards (the
 	// enable flow sets the flag first and only then revokes the other sessions).
 	res, err := s.db.ExecContext(ctx, `INSERT INTO sessions(id_hash, user_id, csrf_token, created_at, last_seen, user_agent)
-		SELECT ?, ?, ?, ?, ?, ? WHERE ? = 0 OR EXISTS (SELECT 1 FROM users WHERE id = ? AND totp_enabled = 0)`,
-		sess.IDHash, userID, csrf, now, now, sess.UserAgent, only2FAOff, userID)
+		SELECT ?, ?, ?, ?, ?, ? WHERE (? = 0 OR EXISTS (SELECT 1 FROM users WHERE id = ? AND totp_enabled = 0))
+		AND (? < 0 OR EXISTS (SELECT 1 FROM users WHERE id = ? AND auth_gen = ?))`,
+		sess.IDHash, userID, csrf, now, now, sess.UserAgent, only2FAOff, userID, gen, userID, gen)
 	if err != nil {
 		return "", Session{}, fmt.Errorf("inserting session: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
+		if gen >= 0 && !only2FAOff {
+			return "", Session{}, errAuthChanged
+		}
 		return "", Session{}, ErrSecondFactorRequired
 	}
 	if err := s.evictOverCap(ctx, userID); err != nil {
@@ -421,7 +445,7 @@ func (s *Store) lookup(ctx context.Context, token string, touch bool) (Session, 
 	}
 	var sess Session
 	var created, seen int64
-	row := s.db.QueryRowContext(ctx, `SELECT u.id, u.username, u.role, u.must_change_password, u.disabled, u.created_at, u.last_login, u.totp_enabled,
+	row := s.db.QueryRowContext(ctx, `SELECT u.id, u.username, u.role, u.must_change_password, u.disabled, u.created_at, u.last_login, u.totp_enabled, u.auth_gen,
 		s.id_hash, s.csrf_token, s.created_at, s.last_seen, s.user_agent
 		FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id_hash = ?`, hashToken(token))
 	u, err := scanUser(row, &sess.IDHash, &sess.CSRFToken, &created, &seen, &sess.UserAgent)
@@ -517,7 +541,7 @@ func (s *Store) ChangePassword(ctx context.Context, userID int64, username, newP
 		return "", Session{}, err
 	}
 	defer tx.Rollback() //nolint:errcheck
-	if _, err := tx.ExecContext(ctx, `UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?`, hash, userID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET password_hash = ?, must_change_password = 0, auth_gen = auth_gen + 1 WHERE id = ?`, hash, userID); err != nil {
 		return "", Session{}, fmt.Errorf("updating password: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ? AND id_hash <> ?`, userID, cur.IDHash); err != nil {
@@ -638,32 +662,23 @@ func (s *Store) UpdateUser(ctx context.Context, id int64, role *Role, disabled *
 	return User{}, errors.New("updating user: changed concurrently, try again")
 }
 
+// dropOtherSessions deletes the user's sessions except keepIDHash (empty deletes all).
+func (s *Store) dropOtherSessions(ctx context.Context, x execer, userID int64, keepIDHash string) error {
+	if s.beforeRevoke != nil {
+		s.beforeRevoke()
+	}
+	if _, err := x.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ? AND id_hash <> ?`, userID, keepIDHash); err != nil {
+		return fmt.Errorf("dropping sessions: %w", err)
+	}
+	return nil
+}
+
 // DeleteOtherSessions removes every session of the user except the one identified by
 // keepIDHash, and ends the event streams bound to the removed ones.
 func (s *Store) DeleteOtherSessions(ctx context.Context, userID int64, keepIDHash string) error {
-	rows, err := s.db.QueryContext(ctx, `SELECT id_hash FROM sessions WHERE user_id = ? AND id_hash <> ?`, userID, keepIDHash)
-	if err != nil {
-		return fmt.Errorf("listing sessions: %w", err)
-	}
-	var gone []string
-	for rows.Next() {
-		var h string
-		if err := rows.Scan(&h); err != nil {
-			rows.Close()
-			return err
-		}
-		gone = append(gone, h)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
+	if err := s.dropOtherSessions(ctx, s.db, userID, keepIDHash); err != nil {
 		return err
 	}
-	rows.Close()
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ? AND id_hash <> ?`, userID, keepIDHash); err != nil {
-		return fmt.Errorf("dropping sessions: %w", err)
-	}
-	for _, h := range gone {
-		s.endWatchers(userID, h)
-	}
+	s.endOtherWatchers(userID, keepIDHash)
 	return nil
 }

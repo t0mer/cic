@@ -113,6 +113,17 @@ func (s *Store) SetPendingTOTP(ctx context.Context, userID int64, secretB32 stri
 // and issues a fresh set of backup codes in one transaction. The plaintext codes (formatted
 // XXXXX-XXXXX) are returned once and cannot be recovered.
 func (s *Store) EnableTOTP(ctx context.Context, userID int64, code string, now time.Time) ([]string, error) {
+	return s.enableTOTP(ctx, userID, code, now, nil)
+}
+
+// EnableTOTPRevoking is EnableTOTP that, in the same transaction, deletes every other
+// session of the user (all but keepIDHash). If that fails nothing changes and an error is
+// returned.
+func (s *Store) EnableTOTPRevoking(ctx context.Context, userID int64, code string, now time.Time, keepIDHash string) ([]string, error) {
+	return s.enableTOTP(ctx, userID, code, now, &keepIDHash)
+}
+
+func (s *Store) enableTOTP(ctx context.Context, userID int64, code string, now time.Time, keep *string) ([]string, error) {
 	plain, enabled, _, enc, err := s.loadSecret(ctx, s.db, userID)
 	if err != nil {
 		return nil, err
@@ -142,7 +153,7 @@ func (s *Store) EnableTOTP(ctx context.Context, userID int64, code string, now t
 	// First statement is the write (compare-and-set) so the transaction never upgrades a read
 	// lock. It is bound to the exact ciphertext that was verified: a concurrent setup that
 	// replaced the pending secret makes this match nothing.
-	res, err := tx.ExecContext(ctx, `UPDATE users SET totp_enabled = 1, totp_last_step = ? WHERE id = ? AND totp_enabled = 0 AND totp_secret = ?`, step, userID, enc)
+	res, err := tx.ExecContext(ctx, `UPDATE users SET totp_enabled = 1, totp_last_step = ?, auth_gen = auth_gen + 1 WHERE id = ? AND totp_enabled = 0 AND totp_secret = ?`, step, userID, enc)
 	if err != nil {
 		return nil, fmt.Errorf("enabling totp: %w", err)
 	}
@@ -156,8 +167,16 @@ func (s *Store) EnableTOTP(ctx context.Context, userID int64, code string, now t
 	if err := replaceBackupCodes(ctx, tx, userID, hashes); err != nil {
 		return nil, err
 	}
+	if keep != nil {
+		if err := s.dropOtherSessions(ctx, tx, userID, *keep); err != nil {
+			return nil, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
+	}
+	if keep != nil {
+		s.endOtherWatchers(userID, *keep)
 	}
 	return codes, nil
 }
@@ -229,7 +248,7 @@ func (s *Store) RegenerateBackupCodes(ctx context.Context, userID int64) ([]stri
 		return nil, err
 	}
 	defer tx.Rollback() //nolint:errcheck
-	res, err := tx.ExecContext(ctx, `UPDATE users SET totp_enabled = totp_enabled WHERE id = ? AND totp_enabled = 1`, userID)
+	res, err := tx.ExecContext(ctx, `UPDATE users SET auth_gen = auth_gen + 1 WHERE id = ? AND totp_enabled = 1`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -248,12 +267,23 @@ func (s *Store) RegenerateBackupCodes(ctx context.Context, userID int64) ([]stri
 // DisableTOTP clears the secret, the flags and all backup codes. It needs no key, so the
 // CLI can use it to rescue a locked-out account. Calling it with 2FA off is not an error.
 func (s *Store) DisableTOTP(ctx context.Context, userID int64) error {
+	return s.disableTOTP(ctx, userID, nil)
+}
+
+// DisableTOTPRevoking is DisableTOTP that, in the same transaction, deletes the user's
+// sessions except keepIDHash (empty deletes all of them, as the CLI rescue does). If that
+// fails nothing changes and an error is returned.
+func (s *Store) DisableTOTPRevoking(ctx context.Context, userID int64, keepIDHash string) error {
+	return s.disableTOTP(ctx, userID, &keepIDHash)
+}
+
+func (s *Store) disableTOTP(ctx context.Context, userID int64, keep *string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck
-	res, err := tx.ExecContext(ctx, `UPDATE users SET totp_secret = NULL, totp_enabled = 0, totp_last_step = 0 WHERE id = ?`, userID)
+	res, err := tx.ExecContext(ctx, `UPDATE users SET totp_secret = NULL, totp_enabled = 0, totp_last_step = 0, auth_gen = auth_gen + 1 WHERE id = ?`, userID)
 	if err != nil {
 		return fmt.Errorf("disabling totp: %w", err)
 	}
@@ -263,7 +293,18 @@ func (s *Store) DisableTOTP(ctx context.Context, userID int64) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM backup_codes WHERE user_id = ?`, userID); err != nil {
 		return fmt.Errorf("deleting backup codes: %w", err)
 	}
-	return tx.Commit()
+	if keep != nil {
+		if err := s.dropOtherSessions(ctx, tx, userID, *keep); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if keep != nil {
+		s.endOtherWatchers(userID, *keep)
+	}
+	return nil
 }
 
 func replaceBackupCodes(ctx context.Context, tx *sql.Tx, userID int64, hashes []string) error {
@@ -349,4 +390,13 @@ func (s *Store) CheckTOTPKey(ctx context.Context) error {
 		return errors.New("a stored two-factor secret does not decrypt with the loaded secret key")
 	}
 	return nil
+}
+
+// HasTOTPUsers reports whether any account has two-factor enabled.
+func (s *Store) HasTOTPUsers(ctx context.Context) (bool, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE totp_enabled = 1`).Scan(&n); err != nil {
+		return false, fmt.Errorf("counting two-factor users: %w", err)
+	}
+	return n > 0, nil
 }

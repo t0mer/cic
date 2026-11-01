@@ -287,3 +287,15 @@ func TestCheckTOTPKey(t *testing.T) {
 		t.Fatal("wrong key not detected")
 	}
 }
+
+func TestHasTOTPUsers(t *testing.T) {
+	st, u, _, _ := totpStore(t)
+	ctx := context.Background()
+	if has, err := st.HasTOTPUsers(ctx); err != nil || has {
+		t.Fatalf("before enabling: has=%v err=%v", has, err)
+	}
+	enableTOTP(t, st, u, time.Unix(1700000000, 0))
+	if has, err := st.HasTOTPUsers(ctx); err != nil || !has {
+		t.Fatalf("after enabling: has=%v err=%v", has, err)
+	}
+}
