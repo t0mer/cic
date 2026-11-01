@@ -11,7 +11,11 @@ const fold = (s: string) => s.normalize('NFKC').toLocaleLowerCase()
 export function matchesSearch(d: Device, query: string): boolean {
   const q = fold(query.trim())
   if (!q) return true
-  return fold(d.full_name).includes(q) || fold(d.device).includes(q)
+  return (
+    fold(d.full_name).includes(q) ||
+    fold(d.device).includes(q) ||
+    fold(d.location_name ?? '').includes(q)
+  )
 }
 
 export function filterDevices(devices: Device[], query: string, status: StatusFilter): Device[] {

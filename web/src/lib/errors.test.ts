@@ -21,6 +21,12 @@ describe('commandErrorMessage', () => {
     expect(commandErrorMessage(e(404, 'x', 'unknown_device'))).toBe('Unknown device')
     expect(commandErrorMessage(e(400, 'phone is bad', 'invalid'))).toBe('phone is bad')
   })
+  it('maps busy and not_found', () => {
+    expect(commandErrorMessage(e(503, 'x', 'busy'))).toBe(
+      'The server is busy, try again in a moment',
+    )
+    expect(commandErrorMessage(e(404, 'x', 'not_found'))).toBe('That item no longer exists')
+  })
   it('uses Retry-After for 429', () => {
     expect(commandErrorMessage(e(429, 'x', 'rate_limited', 12))).toBe(
       'Too many requests, try again in 12s',

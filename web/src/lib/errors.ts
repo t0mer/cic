@@ -23,9 +23,15 @@ export function commandErrorMessage(err: unknown): string {
       return 'Broker not connected'
     case 'unknown_device':
       return 'Unknown device'
+    case 'busy':
+      return 'The server is busy, try again in a moment'
+    case 'not_found':
+      return 'That item no longer exists'
     case 'unavailable':
       return 'Service unavailable, try again shortly'
     case 'invalid':
+    case 'forbidden_change':
+    case 'user_exists':
       return err.message
     default:
       break

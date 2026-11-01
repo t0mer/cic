@@ -1,12 +1,18 @@
 import type {
   ActivityPage,
+  AdminUser,
   Broker,
   CommandAck,
+  CreatedUser,
   Device,
+  DevicePatch,
+  GeocodeUsage,
   ErrorCode,
   LoginResponse,
   Me,
+  UiConfig,
 } from './types'
+import { parseUiConfig } from './ui-config'
 
 export class ApiError extends Error {
   readonly status: number
@@ -31,6 +37,11 @@ export const devicesKey = ['devices'] as const
 export const brokerKey = ['broker'] as const
 export const authKey = ['auth', 'me'] as const
 export const activityKey = ['activity'] as const
+export const uiConfigKey = ['ui-config'] as const
+/** Admin list including hidden devices. Under the `devices` prefix, so prefix invalidation covers both. */
+export const allDevicesKey = ['devices', 'all'] as const
+export const usersKey = ['users'] as const
+export const geocodeUsageKey = ['geocode-usage'] as const
 
 // The CSRF token lives in module memory only: never in storage, cookies or URLs.
 let csrfToken: string | null = null
@@ -63,7 +74,7 @@ export const setAuthHandlers = (h: AuthHandlers | null) => {
 }
 
 interface RequestOptions {
-  method?: 'GET' | 'POST'
+  method?: 'GET' | 'POST' | 'PATCH' | 'DELETE'
   body?: unknown
   /** Do not treat a 401 as "session lost" (login, me, change-password, logout). */
   skipAuthHandler?: boolean
@@ -79,6 +90,10 @@ const CODES: readonly string[] = [
   'not_connected',
   'outcome_unknown',
   'unavailable',
+  'forbidden_change',
+  'user_exists',
+  'busy',
+  'not_found',
 ]
 
 async function request<T>(url: string, opts: RequestOptions = {}): Promise<T> {
@@ -121,6 +136,8 @@ async function request<T>(url: string, opts: RequestOptions = {}): Promise<T> {
 
 export const fetchDevices = () => request<Device[]>('/api/devices')
 export const fetchBroker = () => request<Broker>('/api/broker')
+export const fetchUiConfig = async (): Promise<UiConfig> =>
+  parseUiConfig(await request<unknown>('/api/ui-config'))
 
 /** Resolves to null (not an error) when anonymous. */
 export async function fetchMe(): Promise<Me | null> {
@@ -194,3 +211,34 @@ export const fetchActivity = (before?: string | number | null, limit = 50) => {
   if (before !== undefined && before !== null) q.set('before', String(before))
   return request<ActivityPage>(`/api/activity?${q.toString()}`)
 }
+
+const devicePath = (d: Pick<Device, 'prefix' | 'device'>) =>
+  `/api/devices/${encodeURIComponent(d.prefix)}/${encodeURIComponent(d.device)}`
+
+export const fetchAllDevices = () => request<Device[]>('/api/devices?include_hidden=1')
+
+export const patchDevice = (device: Pick<Device, 'prefix' | 'device'>, patch: DevicePatch) =>
+  request<Device>(devicePath(device), { method: 'PATCH', body: patch })
+
+export const deleteDevice = (device: Pick<Device, 'prefix' | 'device'>) =>
+  request<void>(devicePath(device), { method: 'DELETE' })
+
+export const fetchUsers = () => request<AdminUser[]>('/api/users')
+
+export const createUser = (body: { username: string; role: string; password?: string }) =>
+  request<CreatedUser>('/api/users', { method: 'POST', body })
+
+export const patchUser = (id: number | string, patch: { role?: string; disabled?: boolean }) =>
+  request<AdminUser>(`/api/users/${encodeURIComponent(String(id))}`, {
+    method: 'PATCH',
+    body: patch,
+  })
+
+export const resetUserPassword = (id: number | string) =>
+  request<{ initial_password: string }>(
+    `/api/users/${encodeURIComponent(String(id))}/reset-password`,
+    { method: 'POST' },
+  )
+
+/** Rejects with a 404 ApiError until the server ships geocoding. */
+export const fetchGeocodeUsage = () => request<GeocodeUsage>('/api/geocode/usage')
