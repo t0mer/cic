@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowLeft, LockKeyhole, MapPinOff, Power } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, LockKeyhole, MapPinOff } from 'lucide-react'
 import { lazy, Suspense, useMemo, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 
@@ -82,8 +82,8 @@ export function HistoryPage() {
     [range.from, range.to],
   )
   const tz = useMemo(() => browserTimeZone(), [])
-  const disabled = cfgQ.data?.history_enabled === false
-  const enabled = isAdmin && !disabled && !cfgQ.isPending
+  const recordingOff = cfgQ.data?.history_enabled === false
+  const enabled = isAdmin
   const routesQ = useRoutes(prefix, device, apiRange, tz, enabled)
   // Raw points feed the table and the accuracy of a tapped map point.
   const historyQ = useHistory(prefix, device, apiRange, enabled && !!routesQ.data)
@@ -139,19 +139,10 @@ export function HistoryPage() {
       <Notice icon={<LockKeyhole />} title="Location history is for administrators only" />,
     )
 
-  if (disabled)
-    return wrap(
-      <Notice icon={<Power />} title="History is disabled">
-        <p className="max-w-prose text-sm text-muted-foreground">
-          Location history is turned off on this server, so nothing is being recorded.
-        </p>
-      </Notice>,
-    )
-
   const err = routesQ.error ?? historyQ.error
   let body: React.ReactNode
   if (!apiRange) body = null
-  else if (routesQ.isPending || cfgQ.isPending) body = <Loading />
+  else if (routesQ.isPending) body = <Loading />
   else if (routesQ.error && !routesQ.data) {
     const e = routesQ.error
     body =
@@ -189,6 +180,14 @@ export function HistoryPage() {
     const truncated = historyQ.data?.truncated === true
     body = (
       <div className="flex min-w-0 flex-col gap-3">
+        {recordingOff ? (
+          <p
+            role="status"
+            className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200"
+          >
+            New locations are not being recorded; showing stored history.
+          </p>
+        ) : null}
         {err ? (
           <p
             role="status"
@@ -225,7 +224,21 @@ export function HistoryPage() {
         >
           <div className="flex min-w-0 flex-col gap-2">
             <div className="h-[55dvh] min-h-72 lg:h-[calc(100dvh-20rem)]">
-              {cfg ? (
+              {cfgQ.error && !cfg ? (
+                <div className="flex h-full flex-col items-center justify-center gap-2 rounded-xl border border-dashed p-4 text-center">
+                  <p role="alert" className="text-sm text-destructive">
+                    Could not load the map configuration.
+                  </p>
+                  <Button
+                    variant="outline"
+                    className="h-11 px-6"
+                    disabled={cfgQ.isFetching}
+                    onClick={() => void cfgQ.refetch()}
+                  >
+                    Retry
+                  </Button>
+                </div>
+              ) : cfg ? (
                 <Suspense
                   fallback={
                     <div role="status" className="p-4 text-sm text-muted-foreground">
@@ -241,7 +254,15 @@ export function HistoryPage() {
                     fitKey={fitKey}
                   />
                 </Suspense>
-              ) : null}
+              ) : (
+                <div
+                  role="status"
+                  aria-busy="true"
+                  className="h-full animate-pulse rounded-xl border bg-accent"
+                >
+                  <span className="sr-only">Loading map</span>
+                </div>
+              )}
             </div>
             <ul
               aria-label="Legend"

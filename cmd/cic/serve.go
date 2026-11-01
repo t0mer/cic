@@ -27,7 +27,6 @@ import (
 	"github.com/t0mer/cic/internal/devices"
 	"github.com/t0mer/cic/internal/events"
 	"github.com/t0mer/cic/internal/geocode"
-	"github.com/t0mer/cic/internal/history"
 	"github.com/t0mer/cic/internal/mqtt"
 	"github.com/t0mer/cic/internal/places"
 	"github.com/t0mer/cic/internal/secret"
@@ -109,13 +108,8 @@ func runServe(parent context.Context, cfg *config.Config) error {
 
 	registry := devices.NewRegistry(db, cfg.Devices.OfflineAfter, log)
 	registry.SetMaxDevices(cfg.Devices.MaxDevices)
-	if l := cfg.Locations; l.Enabled {
-		recorder := history.New(db, history.Config{Retention: l.Retention, MinDistanceM: l.MinDistanceM,
-			MinInterval: l.MinInterval, MaxPoints: l.MaxPointsPerDevice}, log)
-		registry.OnLocation(recorder.OnLocation) // before the MQTT client starts
-		registry.OnRemove(func(d devices.Device) { recorder.Forget(d.Key) })
-		go recorder.RunJanitor(ctx, l.Retention, locationsPurgeEvery, log)
-	}
+	stopHistory := startHistory(ctx, db, registry, cfg.Locations, log)
+	defer func() { stop(); stopHistory() }() // cancel, then flush queued fixes before db.Close
 	placeStore, err := places.NewStore(ctx, db)
 	if err != nil {
 		return fmt.Errorf("loading safe places: %w", err)

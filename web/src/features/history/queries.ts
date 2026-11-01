@@ -17,6 +17,9 @@ export interface HistoryRange {
 // range in the past never changes.
 const staleFor = (r: HistoryRange) => (Date.parse(r.to) > Date.now() ? 30_000 : 5 * 60_000)
 
+/** Poll a range that can still gain fixes (TanStack pauses it while the tab is hidden); closed ranges never refetch. */
+export const refetchFor = (r: HistoryRange) => (Date.parse(r.to) > Date.now() ? 60_000 : false)
+
 export const historyKey = (deviceKey: string, r: HistoryRange) =>
   ['history', deviceKey, r.from, r.to, HISTORY_LIMIT] as const
 export const routesKey = (deviceKey: string, r: HistoryRange, tz: string) =>
@@ -34,6 +37,7 @@ export function useRoutes(
     queryFn: () => fetchRoutes(prefix, device, { ...(range as HistoryRange), tz }),
     enabled: enabled && range !== null,
     staleTime: range ? staleFor(range) : 0,
+    refetchInterval: () => (range ? refetchFor(range) : false),
     retry,
   })
 }
@@ -50,6 +54,7 @@ export function useHistory(
       fetchHistory(prefix, device, { ...(range as HistoryRange), limit: HISTORY_LIMIT }),
     enabled: enabled && range !== null,
     staleTime: range ? staleFor(range) : 0,
+    refetchInterval: () => (range ? refetchFor(range) : false),
     retry,
   })
 }

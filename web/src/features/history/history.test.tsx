@@ -1,6 +1,14 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import {
+  cleanup,
+  fireEvent,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -10,6 +18,7 @@ import { auth, stubApi, type Call } from '@/features/settings/test-utils'
 import { makeDevice } from '@/lib/fixtures'
 import type { Role, RouteDay } from '@/lib/types'
 import { HistoryPage } from './HistoryPage'
+import { useHistory, useRoutes } from './queries'
 
 // The real map needs WebGL; the page logic is what is under test here.
 vi.mock('./HistoryMap', () => ({
@@ -181,11 +190,36 @@ describe('HistoryPage', () => {
     expect(await screen.findByText('You do not have access to location history')).toBeTruthy()
   })
 
-  it('says history is disabled and does not query it', async () => {
-    const calls = api({ historyEnabled: false })
+  it('shows stored history with a notice when recording is disabled', async () => {
+    api({ historyEnabled: false })
     show('admin')
-    expect(await screen.findByText('History is disabled')).toBeTruthy()
-    expect(calls.some((c) => c.url.includes('/routes') || c.url.includes('/history'))).toBe(false)
+    expect(await screen.findAllByTestId('day-row')).toHaveLength(2)
+    expect(await screen.findByTestId('fake-map')).toBeTruthy()
+    expect(
+      screen.getByText('New locations are not being recorded; showing stored history.'),
+    ).toBeTruthy()
+    expect(screen.queryByText('History is disabled')).toBeNull()
+  })
+
+  it('shows a retry for a failed config and refetches it', async () => {
+    let fail = true
+    const calls = stubApi((c) => {
+      if (c.url === '/api/ui-config')
+        return fail ? { status: 500, json: { error: 'cfg boom' } } : { json: cfg() }
+      if (c.url === '/api/devices') return { json: [] }
+      if (c.url.includes('/routes')) return { json: { days } }
+      return { json: { points, truncated: false } }
+    })
+    show('admin')
+    expect(await screen.findAllByTestId('day-row')).toHaveLength(2)
+    expect(
+      (await screen.findByText('Could not load the map configuration.')).textContent,
+    ).toBeTruthy()
+    expect(screen.queryByTestId('fake-map')).toBeNull()
+    fail = false
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(await screen.findByTestId('fake-map')).toBeTruthy()
+    expect(calls.filter((c) => c.url === '/api/ui-config').length).toBe(2)
   })
 
   it('blocks viewers without querying', async () => {
@@ -239,5 +273,34 @@ describe('History entry point', () => {
   it('is absent for viewers', () => {
     card('viewer')
     expect(screen.queryByRole('link', { name: /Location history/ })).toBeNull()
+  })
+})
+
+describe('history refetch interval', () => {
+  const opts = (qc: QueryClient) =>
+    qc.getQueryCache().getAll()[0].observers[0].options as unknown as { refetchInterval: (q?: unknown) => unknown }
+
+  it.each([
+    ['an open range', new Date(Date.now() + 3_600_000).toISOString(), 60_000],
+    ['a closed range', '2020-01-02T00:00:00.000Z', false],
+  ])('sets it for %s as expected', async (_n, to, want) => {
+    stubApi(() => ({ json: { days: [] } }))
+    const range = { from: '2020-01-01T00:00:00.000Z', to }
+    const wrap = (qc: QueryClient) =>
+      function W({ children }: { children: React.ReactNode }) {
+        return <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+      }
+    for (const hook of [useRoutes, useHistory]) {
+      const qc = new QueryClient()
+      renderHook(
+        () =>
+          hook === useRoutes
+            ? useRoutes('p', 'd', range, 'UTC', true)
+            : useHistory('p', 'd', range, true),
+        { wrapper: wrap(qc) },
+      )
+      await waitFor(() => expect(qc.getQueryCache().getAll()).toHaveLength(1))
+      expect(opts(qc).refetchInterval()).toBe(want)
+    }
   })
 })

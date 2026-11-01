@@ -1,4 +1,13 @@
 // Package history records a thinned location history of each device in the location_points table.
+//
+// Persistence never runs on the MQTT event path. OnLocation only enqueues the fix into a bounded
+// in-memory queue (queueSize); a single writer goroutine (RunWriter) drains it in order, so fixes
+// of a device are stored in the order they arrived. Overload behaviour: when the queue is full the
+// OLDEST queued fix is discarded to make room for the new one, the number of discarded fixes is
+// counted (Dropped) and logged at warn, rate-limited, with the running total. A write that fails
+// with SQLITE_BUSY or "database is locked" is retried a few times with a short backoff before the
+// fix is logged and dropped. On shutdown the writer flushes what is queued, for at most
+// shutdownFlush.
 package history
 
 import (
@@ -8,6 +17,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,13 +47,37 @@ type Recorder struct {
 	log  *slog.Logger
 	warn ratelog.Limiter
 
-	mu   sync.Mutex
+	mu   sync.Mutex       // serialises Record and the purge DELETEs with the cache they maintain
 	last map[string]point // most recent stored point per device, loaded lazily
 
 	inserts      map[string]int // inserts per device since the last lazy cap check
 	beforeInsert func()         // test seam, called under mu just before the insert
-	afterDeletes func()         // test seam, called by purge after its DELETEs, outside mu
+	afterDeletes func()         // test seam, called by purge after each DELETE batch, under mu
+
+	qmu       sync.Mutex
+	queue     []fix
+	queueSize int
+	dropped   uint64
+	wake      chan struct{}
+	dropWarn  ratelog.Limiter
+	write     func(ctx context.Context, f fix) error // test seam, defaults to Record
+	backoff   []time.Duration
 }
+
+type fix struct {
+	key      string
+	ts       int64
+	lat, lon float64
+	acc      *float64
+}
+
+const (
+	// DefaultQueueSize is the capacity of the in-memory queue between the MQTT path and the writer.
+	DefaultQueueSize = 1024
+	shutdownFlush    = 5 * time.Second
+	writeTimeout     = 5 * time.Second
+	purgeBatch       = 5000 // rows per retention DELETE, so the write lock is held briefly
+)
 
 type point struct {
 	ts       int64
@@ -55,8 +89,12 @@ func New(db *sql.DB, cfg Config, log *slog.Logger) *Recorder {
 	if cfg.Retention <= 0 {
 		cfg.Retention = DefaultRetention
 	}
-	return &Recorder{db: db, cfg: cfg, now: time.Now, log: log,
-		warn: ratelog.Limiter{Interval: time.Minute}, last: map[string]point{}, inserts: map[string]int{}}
+	r := &Recorder{db: db, cfg: cfg, now: time.Now, log: log,
+		warn: ratelog.Limiter{Interval: time.Minute}, last: map[string]point{}, inserts: map[string]int{},
+		queueSize: DefaultQueueSize, wake: make(chan struct{}, 1), dropWarn: ratelog.Limiter{Interval: time.Minute},
+		backoff: []time.Duration{50 * time.Millisecond, 200 * time.Millisecond, 800 * time.Millisecond}}
+	r.write = func(ctx context.Context, f fix) error { return r.Record(ctx, f.key, f.ts, f.lat, f.lon, f.acc) }
+	return r
 }
 
 // Record stores the fix unless it is invalid, outside the retention window, a duplicate of an
@@ -203,16 +241,127 @@ func (r *Recorder) loadLast(ctx context.Context, key string) (point, bool, error
 	return p, true, nil
 }
 
-// OnLocation has the signature of the devices.Registry location hook. A failure is logged at
-// warn, rate-limited, and never returned: recording must not disturb the MQTT path.
+// OnLocation has the signature of the devices.Registry location hook. It only enqueues the fix
+// (never blocks, never touches the database); RunWriter persists it. When the queue is full the
+// oldest queued fix is dropped.
 func (r *Recorder) OnLocation(key string, ts int64, lat, lon float64, accuracy *float64) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := r.Record(ctx, key, ts, lat, lon, accuracy); err != nil {
-		if total, ok := r.warn.Hit(); ok {
-			r.log.Warn("recording location failed", "device", key, "failures", total, "err", err)
+	f := fix{key: key, ts: ts, lat: lat, lon: lon}
+	if accuracy != nil {
+		a := *accuracy
+		f.acc = &a
+	}
+	r.qmu.Lock()
+	dropped := false
+	for len(r.queue) >= r.queueSize { // a loop: the shutdown requeue can leave it above the bound
+		copy(r.queue, r.queue[1:])
+		r.queue = r.queue[:len(r.queue)-1]
+		r.dropped++
+		dropped = true
+	}
+	r.queue = append(r.queue, f)
+	total := r.dropped
+	r.qmu.Unlock()
+	if dropped {
+		if _, ok := r.dropWarn.Hit(); ok {
+			r.log.Warn("location history queue full, dropped the oldest queued fix", "dropped_total", total)
 		}
 	}
+	select {
+	case r.wake <- struct{}{}:
+	default:
+	}
+}
+
+// Dropped returns how many queued fixes were discarded because the queue was full.
+func (r *Recorder) Dropped() uint64 {
+	r.qmu.Lock()
+	defer r.qmu.Unlock()
+	return r.dropped
+}
+
+func (r *Recorder) take() []fix {
+	r.qmu.Lock()
+	defer r.qmu.Unlock()
+	b := r.queue
+	r.queue = nil
+	return b
+}
+
+// RunWriter persists queued fixes, in order, until ctx is done, then flushes the rest of the queue
+// for at most shutdownFlush. Run exactly one.
+func (r *Recorder) RunWriter(ctx context.Context) {
+	for {
+		r.drain(ctx)
+		select {
+		case <-ctx.Done():
+			fctx, cancel := context.WithTimeout(context.Background(), shutdownFlush)
+			r.drain(fctx)
+			cancel()
+			if n := len(r.take()); n > 0 {
+				r.log.Warn("location history fixes lost at shutdown", "count", n)
+			}
+			return
+		case <-r.wake:
+		}
+	}
+}
+
+func (r *Recorder) drain(ctx context.Context) {
+	for ctx.Err() == nil {
+		batch := r.take()
+		if len(batch) == 0 {
+			return
+		}
+		for i, f := range batch {
+			if ctx.Err() != nil {
+				// Put the unwritten rest back, ahead of anything newer, for the shutdown flush.
+				r.qmu.Lock()
+				r.queue = append(batch[i:len(batch):len(batch)], r.queue...)
+				r.qmu.Unlock()
+				return
+			}
+			if err := r.persist(ctx, f); err != nil && ctx.Err() != nil {
+				// Interrupted by shutdown, not rejected by the database: keep this fix too.
+				r.qmu.Lock()
+				r.queue = append(batch[i:len(batch):len(batch)], r.queue...)
+				r.qmu.Unlock()
+				return
+			}
+		}
+	}
+}
+
+// persist writes one fix, retrying a busy database a few times, then logs and drops it. It
+// returns the final error; a failure caused by ctx being cancelled is not logged (the caller
+// requeues the fix).
+func (r *Recorder) persist(ctx context.Context, f fix) error {
+	var err error
+	for attempt := 0; ; attempt++ {
+		wctx, cancel := context.WithTimeout(ctx, writeTimeout)
+		err = r.write(wctx, f)
+		cancel()
+		if err == nil || !isBusy(err) || attempt >= len(r.backoff) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(r.backoff[attempt]):
+		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	if err != nil && ctx.Err() == nil {
+		if total, ok := r.warn.Hit(); ok {
+			r.log.Warn("recording location failed", "device", f.key, "failures", total, "err", err)
+		}
+	}
+	return err
+}
+
+func isBusy(err error) bool {
+	m := err.Error()
+	return strings.Contains(m, "SQLITE_BUSY") || strings.Contains(m, "database is locked") || strings.Contains(m, "SQLITE_LOCKED")
 }
 
 // Forget drops the cached last point of a device (its points were deleted elsewhere).
@@ -223,18 +372,6 @@ func (r *Recorder) Forget(key string) {
 	r.mu.Unlock()
 }
 
-// DeleteDevice removes all points of a device.
-func (r *Recorder) DeleteDevice(ctx context.Context, key string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	delete(r.last, key)
-	delete(r.inserts, key)
-	if _, err := r.db.ExecContext(ctx, `DELETE FROM location_points WHERE device_key = ?`, key); err != nil {
-		return fmt.Errorf("deleting locations of %q: %w", key, err)
-	}
-	return nil
-}
-
 // Purge deletes points older than the configured retention, then the oldest points of every
 // device that exceeds MaxPoints. It returns the number of rows deleted.
 func (r *Recorder) Purge(ctx context.Context) (int64, error) {
@@ -242,21 +379,18 @@ func (r *Recorder) Purge(ctx context.Context) (int64, error) {
 }
 
 func (r *Recorder) purge(ctx context.Context, retention time.Duration) (int64, error) {
-	// The DELETEs run outside r.mu so ingestion is not stalled; the cache is cleared afterwards
-	// (a newest point may be among the deleted ones) and reloads lazily.
-	defer func() {
-		r.mu.Lock()
-		clear(r.last)
-		r.mu.Unlock()
-	}()
-	if r.afterDeletes != nil {
-		defer r.afterDeletes()
+	cutoff := r.now().Add(-retention).Unix()
+	var total int64
+	for {
+		n, err := r.deleteExpired(ctx, cutoff)
+		total += n
+		if err != nil {
+			return total, err
+		}
+		if n < purgeBatch {
+			break
+		}
 	}
-	res, err := r.db.ExecContext(ctx, `DELETE FROM location_points WHERE ts < ?`, r.now().Add(-retention).Unix())
-	if err != nil {
-		return 0, fmt.Errorf("purging location history: %w", err)
-	}
-	total, _ := res.RowsAffected()
 	if r.cfg.MaxPoints <= 0 {
 		return total, nil
 	}
@@ -279,11 +413,33 @@ func (r *Recorder) purge(ctx context.Context, retention time.Duration) (int64, e
 	}
 	rows.Close()
 	for _, k := range keys {
-		if err := r.trimDevice(ctx, k, &total); err != nil {
+		r.mu.Lock()
+		err := r.trimDevice(ctx, k, &total)
+		r.mu.Unlock()
+		if err != nil {
 			return total, err
 		}
 	}
 	return total, nil
+}
+
+// deleteExpired deletes one batch of points older than cutoff. It holds r.mu across the DELETE and
+// the cache clear, so a concurrent Record can neither thin a new fix against a last point this
+// batch just deleted nor re-cache one afterwards. That only stalls the history writer, never MQTT.
+func (r *Recorder) deleteExpired(ctx context.Context, cutoff int64) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	res, err := r.db.ExecContext(ctx, `DELETE FROM location_points WHERE id IN (
+		SELECT id FROM location_points WHERE ts < ? LIMIT ?)`, cutoff, purgeBatch)
+	clear(r.last) // a newest point may be among the deleted ones; reloads lazily
+	if r.afterDeletes != nil {
+		r.afterDeletes()
+	}
+	if err != nil {
+		return 0, fmt.Errorf("purging location history: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 // RunJanitor purges now and then every `every` until ctx is done. A retention of zero or less

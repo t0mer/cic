@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -11,7 +12,10 @@ import (
 	"github.com/t0mer/cic/internal/api"
 	"github.com/t0mer/cic/internal/audit"
 	"github.com/t0mer/cic/internal/commands"
+	"github.com/t0mer/cic/internal/config"
+	"github.com/t0mer/cic/internal/devices"
 	"github.com/t0mer/cic/internal/events"
+	"github.com/t0mer/cic/internal/history"
 	"github.com/t0mer/cic/internal/mqtt"
 )
 
@@ -157,4 +161,23 @@ func runSweeper(ctx context.Context, c *commands.Correlator, every time.Duration
 			c.Sweep(now())
 		}
 	}
+}
+
+// startHistory runs the location history retention janitor whenever the feature is configured,
+// even while recording is disabled (points recorded earlier must still age out). The recorder
+// hook, and the writer that drains it, exist only when recording is enabled. The returned func
+// waits for both goroutines to finish once ctx is done.
+func startHistory(ctx context.Context, db *sql.DB, registry *devices.Registry, l config.LocationsConfig, log *slog.Logger) (wait func()) {
+	recorder := history.New(db, history.Config{Retention: l.Retention, MinDistanceM: l.MinDistanceM,
+		MinInterval: l.MinInterval, MaxPoints: l.MaxPointsPerDevice}, log)
+	var wg sync.WaitGroup
+	if l.Enabled {
+		registry.OnLocation(recorder.OnLocation) // before the MQTT client starts
+		registry.OnRemove(func(d devices.Device) { recorder.Forget(d.Key) })
+		wg.Add(1)
+		go func() { defer wg.Done(); recorder.RunWriter(ctx) }()
+	}
+	wg.Add(1)
+	go func() { defer wg.Done(); recorder.RunJanitor(ctx, l.Retention, locationsPurgeEvery, log) }()
+	return wg.Wait
 }
