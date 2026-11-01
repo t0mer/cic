@@ -48,3 +48,38 @@ export const newUserPasswordProblem = (v: string): string | null =>
   v === '' || runes(v) >= MIN_PASSWORD
     ? null
     : `Password must be at least ${MIN_PASSWORD} characters`
+
+export const PLACE_NAME_MAX = 40
+export const PLACE_RADIUS_MIN = 10
+export const PLACE_RADIUS_MAX = 50_000
+
+export const placeNameProblem = (v: string): string | null => {
+  const n = normalizeDeviceName(v)
+  if (n === '') return 'Name is required'
+  if (BAD_NAME_CHAR.test(v)) return 'Name cannot contain control or invisible characters'
+  if (!VISIBLE.test(n)) return 'Name needs at least one visible character'
+  return runes(n) > PLACE_NAME_MAX ? `Name is limited to ${PLACE_NAME_MAX} characters` : null
+}
+
+/** A number typed in a field: empty or non-numeric gives NaN. */
+export const parseNumber = (v: string) => (v.trim() === '' ? NaN : Number(v.trim()))
+
+export const latitudeProblem = (v: string): string | null => {
+  const n = parseNumber(v)
+  return Number.isFinite(n) && n >= -90 && n <= 90 ? null : 'Latitude must be between -90 and 90'
+}
+
+export const longitudeProblem = (v: string): string | null => {
+  const n = parseNumber(v)
+  return Number.isFinite(n) && n >= -180 && n <= 180
+    ? null
+    : 'Longitude must be between -180 and 180'
+}
+
+export const radiusProblem = (v: string): string | null => {
+  const n = parseNumber(v)
+  if (Number.isFinite(n) && !Number.isInteger(n)) return 'Radius must be a whole number of metres'
+  return Number.isFinite(n) && n >= PLACE_RADIUS_MIN && n <= PLACE_RADIUS_MAX
+    ? null
+    : `Radius must be between ${PLACE_RADIUS_MIN} and ${PLACE_RADIUS_MAX} metres`
+}

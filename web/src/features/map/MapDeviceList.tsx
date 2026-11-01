@@ -17,8 +17,9 @@ function Row({ device, onSelect }: { device: Device; onSelect: (key: string) => 
   const Battery = level !== null && level < 20 ? BatteryLow : BatteryFull
   // Same wording as the card: name, else coordinates, else nothing invented.
   const view = describeLocation(device, false, 0)
-  const place =
+  const where =
     view.kind === 'named' ? view.name : view.kind === 'unknown' ? 'No location' : view.coords
+  const place = view.kind !== 'unknown' && view.place ? `${view.place} · ${where}` : where
   const body = (
     <>
       <span

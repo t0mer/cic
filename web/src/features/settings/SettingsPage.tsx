@@ -6,12 +6,14 @@ import { cn } from '@/lib/utils'
 import { AccountSection } from './AccountSection'
 import { DevicesSection } from './DevicesSection'
 import { GeocodingSection } from './GeocodingSection'
+import { PlacesSection } from './PlacesSection'
 import { SystemSection } from './SystemSection'
 import { UsersSection } from './UsersSection'
 
 export const TABS = [
   { id: 'devices', label: 'Devices', admin: true, Panel: DevicesSection },
   { id: 'users', label: 'Users', admin: true, Panel: UsersSection },
+  { id: 'places', label: 'Safe places', admin: true, Panel: PlacesSection },
   { id: 'geocoding', label: 'Geocoding', admin: true, Panel: GeocodingSection },
   { id: 'system', label: 'System', admin: true, Panel: SystemSection },
   { id: 'account', label: 'Account', admin: false, Panel: AccountSection },

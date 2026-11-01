@@ -22,6 +22,7 @@ export function makeDevice(over: Partial<Device> = {}): Device {
     location_time: 1_000_000,
     location_name: null,
     location_name_at: null,
+    safe_place: null,
     device_info: 'Google Pixel 8',
     screen_locked: false,
     last_seen: 1_000_000,

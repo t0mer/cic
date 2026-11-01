@@ -68,6 +68,9 @@ export function useEventStream(enabled: boolean, isAdmin = false): StreamStatus 
         if (!d) return
         applyDeviceUpdate(qc, d)
       })
+      es.addEventListener('devices.refresh', () => {
+        void qc.invalidateQueries({ queryKey: devicesKey })
+      })
       es.addEventListener('command.result', (e) => {
         const r = parse<CommandResult>(e as MessageEvent)
         if (!r || r.id === undefined || r.id === null) return

@@ -2,6 +2,7 @@ import { BatteryFull, BatteryLow, ExternalLink, MapPin, Zap } from 'lucide-react
 
 import { useAuth } from '@/features/auth/auth-context'
 import { PingControl } from '@/features/commands/PingControl'
+import { PlacePrefix } from '@/features/devices/PlaceBadge'
 import { describeLocation } from '@/lib/location'
 import { googleMapsUrl } from '@/lib/maps'
 import { relativeTime } from '@/lib/time'
@@ -69,12 +70,18 @@ export function MapTooltip({
           {view.kind === 'named' ? (
             <>
               <span dir="auto" className="block break-words">
+                <PlacePrefix name={view.place} />
                 {view.name}
               </span>
               <span className="block text-xs text-muted-foreground">{view.coords}</span>
             </>
           ) : view.kind === 'pending' ? (
             <>
+              {view.place ? (
+                <span className="block">
+                  <PlacePrefix name={view.place} />
+                </span>
+              ) : null}
               <span
                 role="status"
                 aria-label="Looking up place name"
@@ -84,6 +91,7 @@ export function MapTooltip({
             </>
           ) : view.kind === 'coords' ? (
             <span dir="auto" className="break-words">
+              <PlacePrefix name={view.place} />
               {view.coords}
             </span>
           ) : (

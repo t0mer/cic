@@ -148,7 +148,24 @@ describe('describeLocation', () => {
   })
   it('prefers the name and keeps coordinates as secondary', () => {
     const v = describeLocation(makeDevice({ location_name: 'Dizengoff St, Tel Aviv' }), true, NOW)
-    expect(v).toEqual({ kind: 'named', name: 'Dizengoff St, Tel Aviv', coords: '32.0853, 34.7818' })
+    expect(v).toEqual({
+      kind: 'named',
+      name: 'Dizengoff St, Tel Aviv',
+      coords: '32.0853, 34.7818',
+      place: null,
+    })
+  })
+  it('carries the safe place in the named, coords and pending views', () => {
+    const safe_place = { id: 1, name: 'Home' }
+    expect(
+      describeLocation(makeDevice({ safe_place, location_name: 'Dizengoff St' }), true, NOW),
+    ).toMatchObject({ kind: 'named', place: 'Home' })
+    expect(
+      describeLocation(makeDevice({ safe_place, location_time: NOW - 600 }), true, NOW),
+    ).toEqual({ kind: 'coords', coords: '32.0853, 34.7818', place: 'Home' })
+    expect(
+      describeLocation(makeDevice({ safe_place, location_time: NOW - 2 }), true, NOW),
+    ).toMatchObject({ kind: 'pending', place: 'Home' })
   })
   it('falls back to coordinates for old fixes, or when geocoding is off', () => {
     expect(describeLocation(makeDevice({ location_time: NOW - 600 }), true, NOW).kind).toBe(

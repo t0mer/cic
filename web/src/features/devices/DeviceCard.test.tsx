@@ -79,6 +79,19 @@ describe('DeviceCard', () => {
 })
 
 describe('DeviceCard location name', () => {
+  it('shows the safe place badge with the address, or with the coordinates', () => {
+    const safe_place = { id: 1, name: 'Home' }
+    render(
+      <DeviceCard device={makeDevice({ safe_place, location_name: 'Dizengoff St' })} now={NOW} />,
+    )
+    expect(screen.getByTestId('place-badge').textContent).toBe('Home')
+    expect(screen.getByText(/Dizengoff St/)).toBeTruthy()
+    cleanup()
+    render(<DeviceCard device={makeDevice({ safe_place })} now={NOW} />)
+    expect(screen.getByTestId('place-badge').textContent).toBe('Home')
+    expect(screen.getByText(/32\.0853, 34\.7818/)).toBeTruthy()
+  })
+
   it('shows the name with coordinates as the secondary line', () => {
     render(<DeviceCard device={makeDevice({ location_name: 'Dizengoff St' })} now={NOW} />)
     const n = screen.getByText('Dizengoff St')

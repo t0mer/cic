@@ -34,6 +34,11 @@ describe('MapDeviceList', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Show Charlie on the map' }))
     expect(onSelect).toHaveBeenCalledWith('k/c')
   })
+  it('prefixes the safe place to the address', () => {
+    const d = makeDevice({ safe_place: { id: 1, name: 'Home' }, location_name: 'Haifa' })
+    render(<MapDeviceList devices={[d]} query="" onQuery={() => {}} onSelect={() => {}} />)
+    expect(screen.getByText('Home · Haifa')).toBeTruthy()
+  })
   it('reports search input', () => {
     const onQuery = vi.fn()
     render(<MapDeviceList devices={devs} query="" onQuery={onQuery} onSelect={() => {}} />)

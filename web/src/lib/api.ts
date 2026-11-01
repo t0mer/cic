@@ -10,6 +10,8 @@ import type {
   ErrorCode,
   LoginResponse,
   Me,
+  Place,
+  PlaceInput,
   UiConfig,
 } from './types'
 import { parseUiConfig } from './ui-config'
@@ -42,6 +44,7 @@ export const uiConfigKey = ['ui-config'] as const
 export const allDevicesKey = ['devices', 'all'] as const
 export const usersKey = ['users'] as const
 export const geocodeUsageKey = ['geocode-usage'] as const
+export const placesKey = ['places'] as const
 
 // The CSRF token lives in module memory only: never in storage, cookies or URLs.
 let csrfToken: string | null = null
@@ -94,6 +97,7 @@ const CODES: readonly string[] = [
   'user_exists',
   'busy',
   'not_found',
+  'duplicate_name',
 ]
 
 async function request<T>(url: string, opts: RequestOptions = {}): Promise<T> {
@@ -242,3 +246,17 @@ export const resetUserPassword = (id: number | string) =>
 
 /** Rejects with a 404 ApiError until the server ships geocoding. */
 export const fetchGeocodeUsage = () => request<GeocodeUsage>('/api/geocode/usage')
+
+/** The list is a bare array; a `{places: [...]}` envelope is accepted too. */
+export async function fetchPlaces(): Promise<Place[]> {
+  const res = await request<Place[] | { places?: Place[] }>('/api/places')
+  return Array.isArray(res) ? res : (res.places ?? [])
+}
+
+export const createPlace = (body: PlaceInput) =>
+  request<Place>('/api/places', { method: 'POST', body })
+
+export const patchPlace = (id: number, patch: Partial<PlaceInput>) =>
+  request<Place>(`/api/places/${id}`, { method: 'PATCH', body: patch })
+
+export const deletePlace = (id: number) => request<void>(`/api/places/${id}`, { method: 'DELETE' })

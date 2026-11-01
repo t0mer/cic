@@ -5,19 +5,24 @@ import { toast } from 'sonner'
 import {
   allDevicesKey,
   ApiError,
+  createPlace,
   deleteDevice,
+  deletePlace,
   devicesKey,
   fetchAllDevices,
   fetchGeocodeUsage,
+  fetchPlaces,
   fetchUsers,
   geocodeUsageKey,
   patchDevice,
+  patchPlace,
+  placesKey,
   patchUser,
   usersKey,
 } from '@/lib/api'
 import { applyDeviceRemoved, applyDeviceUpdate } from '@/lib/device-cache'
 import { commandErrorMessage } from '@/lib/errors'
-import type { AdminUser, Device, DevicePatch } from '@/lib/types'
+import type { AdminUser, Device, DevicePatch, Place, PlaceInput } from '@/lib/types'
 
 const noRetryOnHttp = (count: number, err: Error) => !(err instanceof ApiError) && count < 2
 
@@ -165,4 +170,47 @@ export function useOnce() {
       busy.current = false
     })
   }, [])
+}
+
+export const usePlaces = () =>
+  useQuery({ queryKey: placesKey, queryFn: fetchPlaces, staleTime: 10_000, retry: noRetryOnHttp })
+
+/** Places and the devices' `safe_place` both change when a place is added, moved or removed. */
+function refreshPlaces(qc: QueryClient) {
+  void qc.invalidateQueries({ queryKey: placesKey })
+  void qc.invalidateQueries({ queryKey: devicesKey })
+}
+
+/** Creates a place, or patches only `patch` when `place` is given. */
+export function useSavePlace(place: Place | null, onDone?: () => void) {
+  const qc = useQueryClient()
+  return useMutation({
+    retry: 0,
+    mutationFn: (v: PlaceInput | Partial<PlaceInput>) =>
+      place ? patchPlace(place.id, v) : createPlace(v as PlaceInput),
+    onSuccess: (p) => {
+      refreshPlaces(qc)
+      toast.success(`Saved ${p.name}`)
+      onDone?.()
+    },
+    onError: (err) => {
+      if (err instanceof ApiError && err.code === 'not_found') refreshPlaces(qc)
+    },
+  })
+}
+
+export function useDeletePlace(place: Place, onDone?: () => void) {
+  const qc = useQueryClient()
+  return useMutation({
+    retry: 0,
+    mutationFn: () => deletePlace(place.id),
+    onSuccess: () => {
+      refreshPlaces(qc)
+      toast.success(`Deleted ${place.name}`)
+      onDone?.()
+    },
+    onError: (err) => {
+      if (err instanceof ApiError && err.code === 'not_found') refreshPlaces(qc)
+    },
+  })
 }

@@ -44,6 +44,20 @@ describe('MapTooltip', () => {
     expect(screen.queryByRole('button', { name: /Ping/ })).toBeNull()
   })
 
+  it('shows the safe place badge before the address, or before the coordinates', () => {
+    const safe_place = { id: 1, name: 'Home' }
+    show('viewer', makeDevice({ safe_place, location_name: 'Dizengoff St, Tel Aviv' }))
+    expect(screen.getByTestId('place-badge').textContent).toBe('Home')
+    expect(screen.getByText('Dizengoff St, Tel Aviv')).toBeTruthy()
+    cleanup()
+    show('viewer', makeDevice({ safe_place }))
+    expect(screen.getByTestId('place-badge').textContent).toBe('Home')
+    expect(screen.getByText(/32\.0853, 34\.7818/)).toBeTruthy()
+    cleanup()
+    show('viewer', makeDevice())
+    expect(screen.queryByTestId('place-badge')).toBeNull()
+  })
+
   it('shows name, battery, charging, relative time and a Google Maps link', () => {
     show('viewer', makeDevice({ charging: true, battery_level: 15 }))
     expect(screen.getByText('Pixel')).toBeTruthy()

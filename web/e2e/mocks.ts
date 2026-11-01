@@ -25,6 +25,7 @@ export const devices = [
     location_time: NOW - 120,
     location_name: 'Dizengoff St, Tel Aviv',
     location_name_at: iso(NOW - 100),
+    safe_place: { id: 1, name: 'Home' } as { id: number; name: string } | null,
     device_info: 'Google Pixel 8 · Android 15',
     screen_locked: false,
     last_seen: NOW - 20,
@@ -51,6 +52,7 @@ export const devices = [
     location_time: NOW - 7200,
     location_name: null,
     location_name_at: null,
+    safe_place: null,
     device_info: 'Samsung Galaxy S23',
     screen_locked: true,
     last_seen: NOW - 7200,
@@ -77,6 +79,7 @@ export const devices = [
     location_time: null,
     location_name: null,
     location_name_at: null,
+    safe_place: null,
     device_info: null,
     screen_locked: null,
     last_seen: 0,
@@ -139,6 +142,22 @@ export interface MockUser {
   last_login: string | null
 }
 
+export interface MockPlace {
+  id: number
+  name: string
+  latitude: number
+  longitude: number
+  radius_m: number
+}
+
+const metres = (aLat: number, aLon: number, bLat: number, bLon: number) => {
+  const r = Math.PI / 180
+  const h =
+    Math.sin(((bLat - aLat) * r) / 2) ** 2 +
+    Math.cos(aLat * r) * Math.cos(bLat * r) * Math.sin(((bLon - aLon) * r) / 2) ** 2
+  return 2 * 6371000 * Math.asin(Math.sqrt(h))
+}
+
 export const GENERATED_PASSWORD = 'Gen-Pass-12345-abc'
 export const RESET_PASSWORD = 'Reset-Pass-67890-xyz'
 
@@ -146,6 +165,8 @@ export interface MockState {
   /** Stateful device list (PATCH/DELETE change it). Hidden devices stay here. */
   devices: typeof devices
   users: MockUser[]
+  /** Stateful safe places; each device's `safe_place` is derived from them on every list. */
+  places: MockPlace[]
   /** null = the usage endpoint answers 404 (geocoding not shipped). */
   geocodeUsage: Record<string, unknown> | null
   /** null = anonymous: every /api call except login answers 401. */
@@ -224,6 +245,7 @@ export async function mockApi(
     requests: [],
     commandError: null,
     devices: structuredClone(devices),
+    places: [{ id: 1, name: 'Home', latitude: 32.0853, longitude: 34.7818, radius_m: 150 }],
     users: [
       {
         id: 1,
@@ -256,6 +278,7 @@ export async function mockApi(
   }
   let cmdSeq = 0
   let userSeq = 2
+  let placeSeq = 1
 
   await page.route(/\/api\//, async (r) => {
     const req = r.request()
@@ -313,7 +336,16 @@ export async function mockApi(
     const badCsrf = () => r.fulfill({ status: 403, json: { error: 'invalid csrf token' } })
     if (path === '/api/devices') {
       const all = isAdmin && url.searchParams.get('include_hidden') === '1'
-      return r.fulfill({ json: state.devices.filter((d) => all || !d.hidden) })
+      const withPlace = (d: (typeof state.devices)[number]) => {
+        const hit =
+          d.latitude === null || d.longitude === null
+            ? undefined
+            : state.places.find(
+                (p) => metres(d.latitude!, d.longitude!, p.latitude, p.longitude) <= p.radius_m,
+              )
+        return { ...d, safe_place: hit ? { id: hit.id, name: hit.name } : null }
+      }
+      return r.fulfill({ json: state.devices.filter((d) => all || !d.hidden).map(withPlace) })
     }
     const dev = /^\/api\/devices\/([^/]+)\/([^/]+)$/.exec(path)
     if (dev && (method === 'PATCH' || method === 'DELETE')) {
@@ -385,6 +417,40 @@ export async function mockApi(
         if (b.role) target.role = b.role
         if (b.disabled !== undefined) target.disabled = b.disabled
         return r.fulfill({ json: target })
+      }
+    }
+    if (path === '/api/places' || path.startsWith('/api/places/')) {
+      if (!isAdmin) return forbidden()
+      if (method !== 'GET' && req.headers()['x-csrf-token'] !== state.csrf) return badCsrf()
+      if (path === '/api/places' && method === 'GET') return r.fulfill({ json: state.places })
+      const dup = (name: string, except?: number) =>
+        state.places.some(
+          (p) => p.id !== except && p.name.toLowerCase() === name.trim().toLowerCase(),
+        )
+      const conflict = () =>
+        r.fulfill({
+          status: 409,
+          json: { error: 'a place with that name already exists', code: 'duplicate_name' },
+        })
+      if (path === '/api/places' && method === 'POST') {
+        const b = body as Omit<MockPlace, 'id'>
+        if (dup(b.name)) return conflict()
+        const place = { ...b, name: b.name.trim(), id: ++placeSeq }
+        state.places.push(place)
+        return r.fulfill({ status: 201, json: place })
+      }
+      const pm = /^\/api\/places\/(\d+)$/.exec(path)
+      const i = pm ? state.places.findIndex((p) => p.id === Number(pm[1])) : -1
+      if (i < 0) return r.fulfill({ status: 404, json: { error: 'not found', code: 'not_found' } })
+      if (method === 'DELETE') {
+        state.places.splice(i, 1)
+        return r.fulfill({ status: 204 })
+      }
+      if (method === 'PATCH') {
+        const b = body as Partial<Omit<MockPlace, 'id'>>
+        if (b.name !== undefined && dup(b.name, state.places[i].id)) return conflict()
+        state.places[i] = { ...state.places[i], ...b }
+        return r.fulfill({ json: state.places[i] })
       }
     }
     if (path === '/api/geocode/usage') {

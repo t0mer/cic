@@ -97,6 +97,14 @@ describe('useEventStream', () => {
     expect(devices()?.map((d) => d.key)).toEqual(['a/1'])
   })
 
+  it('refetches devices on devices.refresh', () => {
+    qc.setQueryData<Device[]>(devicesKey, [makeDevice({ key: 'a/1' })])
+    const spy = vi.spyOn(qc, 'invalidateQueries')
+    renderHook(() => useEventStream(true), { wrapper })
+    act(() => last().emit('devices.refresh', null))
+    expect(spy).toHaveBeenCalledWith({ queryKey: devicesKey })
+  })
+
   it('removes on device.removed', () => {
     qc.setQueryData<Device[]>(devicesKey, [makeDevice({ key: 'a/1' }), makeDevice({ key: 'a/2' })])
     renderHook(() => useEventStream(true), { wrapper })

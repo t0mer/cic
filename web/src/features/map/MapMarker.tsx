@@ -20,7 +20,8 @@ const TIP_H_GUESS = 230
 export function markerLabel(d: Device, geocodeEnabled: boolean, now: number): string {
   const name = d.full_name || d.device
   const view = describeLocation(d, geocodeEnabled, now)
-  const place = view.kind === 'named' ? view.name : view.kind === 'unknown' ? '' : view.coords
+  const where = view.kind === 'named' ? view.name : view.kind === 'unknown' ? '' : view.coords
+  const place = view.kind !== 'unknown' && view.place ? `${view.place}, ${where}` : where
   return `${name}, ${d.online ? 'online' : 'offline'}${place ? `, ${place}` : ''}`
 }
 

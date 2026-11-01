@@ -28,12 +28,13 @@ describe('role-based rendering', () => {
     expect(screen.queryByRole('heading', { name: 'Users' })).toBeNull()
   })
 
-  it('admins get all five tabs and only the active one loads data', async () => {
+  it('admins get all six tabs and only the active one loads data', async () => {
     const calls = stubApi((c) => (c.url.startsWith('/api/devices') ? { json: [] } : { json: {} }))
     renderWith(<SettingsPage />, 'admin')
     expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual([
       'Devices',
       'Users',
+      'Safe places',
       'Geocoding',
       'System',
       'Account',

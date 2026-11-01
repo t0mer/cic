@@ -21,6 +21,8 @@ export interface Device {
   location_name: string | null
   /** Unix seconds the name was resolved. */
   location_name_at: number | null
+  /** The safe place the phone is inside, or null. */
+  safe_place: { id: number; name: string } | null
   device_info: string | null
   screen_locked: boolean | null
   last_seen: number
@@ -62,6 +64,7 @@ export type ErrorCode =
   | 'user_exists'
   | 'busy'
   | 'not_found'
+  | 'duplicate_name'
 
 export interface CommandAck {
   id: string
@@ -141,3 +144,13 @@ export interface GeocodeUsage {
   blocked_until: string | null
   cache_hit_ratio: number
 }
+
+export interface Place {
+  id: number
+  name: string
+  latitude: number
+  longitude: number
+  radius_m: number
+}
+
+export type PlaceInput = Omit<Place, 'id'>

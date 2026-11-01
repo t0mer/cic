@@ -12,6 +12,7 @@ import { Card } from '@/components/ui/card'
 import { useAuth } from '@/features/auth/auth-context'
 import { DeviceActions } from '@/features/commands/DeviceActions'
 import { DeviceAvatar } from './DeviceAvatar'
+import { PlacePrefix } from './PlaceBadge'
 import { describeLocation } from '@/lib/location'
 import { googleMapsUrl } from '@/lib/maps'
 import { relativeTime } from '@/lib/time'
@@ -76,12 +77,18 @@ function Location({
           {view.kind === 'named' ? (
             <>
               <span dir="auto" className="block break-words" title={view.coords}>
+                <PlacePrefix name={view.place} />
                 {view.name}
               </span>
               <span className="block text-xs text-muted-foreground">{view.coords}</span>
             </>
           ) : view.kind === 'pending' ? (
             <>
+              {view.place ? (
+                <span className="block">
+                  <PlacePrefix name={view.place} />
+                </span>
+              ) : null}
               <span
                 role="status"
                 aria-label="Looking up place name"
@@ -92,6 +99,7 @@ function Location({
             </>
           ) : (
             <span dir="auto" className="break-words">
+              <PlacePrefix name={view.place} />
               {view.coords}
             </span>
           )}

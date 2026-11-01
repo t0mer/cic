@@ -29,6 +29,8 @@ export function commandErrorMessage(err: unknown): string {
       return 'That item no longer exists'
     case 'unavailable':
       return 'Service unavailable, try again shortly'
+    case 'duplicate_name':
+      return 'A safe place with that name already exists'
     case 'invalid':
     case 'forbidden_change':
     case 'user_exists':
@@ -36,6 +38,7 @@ export function commandErrorMessage(err: unknown): string {
     default:
       break
   }
+  if (err.status === 409) return 'A safe place with that name already exists'
   if (err.code === 'rate_limited' || err.status === 429)
     return err.retryAfter !== null
       ? `Too many requests, try again in ${err.retryAfter}s`
