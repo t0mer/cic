@@ -84,7 +84,15 @@ interface RequestOptions {
   body?: unknown
   /** Do not treat a 401 as "session lost" (login, me, change-password, logout). */
   skipAuthHandler?: boolean
+  /**
+   * With skipAuthHandler: still treat a 401 "authentication required" (no session) as session lost,
+   * while other 401s (wrong password/code) stay local.
+   */
+  sessionLostOnAuthRequired?: boolean
 }
+
+/** The server's message for a request that carries no valid session. */
+export const AUTH_REQUIRED = 'authentication required'
 
 const CODES: readonly string[] = [
   'invalid',
@@ -131,7 +139,11 @@ async function request<T>(url: string, opts: RequestOptions = {}): Promise<T> {
     }
     const ra = Number.parseInt(res.headers.get('Retry-After') ?? '', 10)
     const err = new ApiError(res.status, msg, code, Number.isFinite(ra) && ra >= 0 ? ra : null)
-    if (res.status === 401 && !opts.skipAuthHandler) handlers?.onUnauthorized()
+    if (
+      res.status === 401 &&
+      (!opts.skipAuthHandler || (opts.sessionLostOnAuthRequired && msg === AUTH_REQUIRED))
+    )
+      handlers?.onUnauthorized()
     if (res.status === 403 && msg === 'password change required')
       handlers?.onPasswordChangeRequired()
     if (res.status === 403 && isCsrfMessage(msg)) handlers?.onCsrfRejected?.()
@@ -179,33 +191,37 @@ export const loginTwoFactor = (mfa_token: string, code: string) =>
     skipAuthHandler: true,
   })
 
-// Two-factor management. A wrong password/code answers 401, which must not log the user out.
+// Two-factor management. A wrong password/code answers 401 ("invalid credentials"/"invalid code"),
+// which must not log the user out; a 401 "authentication required" is a lost session and does.
 export const twoFactorKey = ['twofactor'] as const
-export const fetchTwoFactor = () =>
-  request<TwoFactorStatus>('/api/auth/2fa', { skipAuthHandler: true })
+export const fetchTwoFactor = () => request<TwoFactorStatus>('/api/auth/2fa')
 export const setupTwoFactor = (current_password: string) =>
   request<TwoFactorSetup>('/api/auth/2fa/setup', {
     method: 'POST',
     body: { current_password },
     skipAuthHandler: true,
+    sessionLostOnAuthRequired: true,
   })
 export const enableTwoFactor = (code: string) =>
   request<{ backup_codes: string[] }>('/api/auth/2fa/enable', {
     method: 'POST',
     body: { code },
     skipAuthHandler: true,
+    sessionLostOnAuthRequired: true,
   })
 export const disableTwoFactor = (current_password: string, code: string) =>
   request<void>('/api/auth/2fa/disable', {
     method: 'POST',
     body: { current_password, code },
     skipAuthHandler: true,
+    sessionLostOnAuthRequired: true,
   })
 export const regenerateBackupCodes = (current_password: string, code: string) =>
   request<{ backup_codes: string[] }>('/api/auth/2fa/backup-codes', {
     method: 'POST',
     body: { current_password, code },
     skipAuthHandler: true,
+    sessionLostOnAuthRequired: true,
   })
 
 export const logout = () =>

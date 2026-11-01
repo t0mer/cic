@@ -20,7 +20,9 @@ import {
   twoFactorKey,
 } from '@/lib/api'
 import type { TwoFactorSetup } from '@/lib/types'
+import { markUnsavedCodes } from '@/lib/leave-guard'
 import { copyText } from './PasswordRevealDialog'
+import { NavigationGuard } from './NavigationGuard'
 
 /** Friendly text for any failure of a two-factor request. Never echoes secrets. */
 export function twoFactorError(err: unknown): string {
@@ -29,7 +31,11 @@ export function twoFactorError(err: unknown): string {
       return err.retryAfter !== null
         ? `Too many attempts. Try again in ${err.retryAfter}s.`
         : 'Too many attempts. Try again later.'
-    if (err.status === 401 || err.status === 403) return 'Incorrect password or code.'
+    if (
+      err.status === 401 &&
+      (err.message === 'invalid credentials' || err.message === 'invalid code')
+    )
+      return 'Incorrect password or code.'
     if (err.status === 400) return err.message
   }
   return 'Something went wrong. Try again.'
@@ -42,7 +48,13 @@ function BackupCodes({ codes, onClose }: { codes: string[]; onClose: () => void 
   const box = useRef<HTMLPreElement>(null)
   const text = codes.join('\n')
 
-  // Closing the tab would lose codes that are shown only once.
+  // Codes are shown only once: also guard in-app navigation and sign out until acknowledged.
+  useEffect(() => {
+    if (saved) return
+    return markUnsavedCodes()
+  }, [saved])
+
+  // Closing the tab would lose them too.
   useEffect(() => {
     const guard = (e: BeforeUnloadEvent) => {
       e.preventDefault()
@@ -69,6 +81,7 @@ function BackupCodes({ codes, onClose }: { codes: string[]; onClose: () => void 
 
   return (
     <>
+      {saved ? null : <NavigationGuard />}
       <div
         role="alert"
         className="flex gap-2 rounded-md border border-amber-500/60 bg-amber-50 p-3 text-sm text-amber-950 dark:bg-amber-950/40 dark:text-amber-100"

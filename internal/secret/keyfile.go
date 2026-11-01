@@ -11,6 +11,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
+)
+
+// Seams for tests: hard-link support and the wait for a concurrently written key file.
+var (
+	linkFile     = os.Link
+	keyReadWait  = time.Second
+	keyReadPause = 20 * time.Millisecond
 )
 
 // LoadOrCreateKey returns the encryption key. A non-empty envValue wins (ParseKey rules).
@@ -31,7 +39,7 @@ func LoadOrCreateKey(envValue, keyPath string, log *slog.Logger) (key []byte, cr
 	if keyPath == "" {
 		return nil, false, ErrNoKey
 	}
-	if k, err := readKeyFile(keyPath, log); err == nil {
+	if k, err := readKeyFileWait(keyPath, log); err == nil {
 		return k, false, nil
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return nil, false, err
@@ -71,17 +79,61 @@ func LoadOrCreateKey(envValue, keyPath string, log *slog.Logger) (key []byte, cr
 	if err := tmp.Close(); err != nil {
 		return nil, false, fmt.Errorf("writing key file: %w", err)
 	}
-	if err := os.Link(tmp.Name(), keyPath); err != nil {
+	if err := linkFile(tmp.Name(), keyPath); err != nil {
 		if errors.Is(err, fs.ErrExist) { // lost the race: use the winner's key
-			k, err := readKeyFile(keyPath, log)
+			k, err := readKeyFileWait(keyPath, log)
 			return k, false, err
 		}
-		return nil, false, fmt.Errorf("installing key file: %w", err)
+		// No hard links here (EPERM, ENOTSUP, EXDEV, ...): create the file exclusively
+		// instead. A concurrent reader may briefly see it incomplete; readKeyFileWait covers
+		// that window, and a failed write removes the file again.
+		return createExclusive(keyPath, k, log)
 	}
 	return k, true, nil
 }
 
-var errEmptyKey = errors.New("empty")
+// createExclusive writes key to path with O_EXCL, syncs it, and on ErrExist uses the key
+// of whoever created the file first.
+func createExclusive(path string, key []byte, log *slog.Logger) ([]byte, bool, error) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			k, err := readKeyFileWait(path, log)
+			return k, false, err
+		}
+		return nil, false, fmt.Errorf("installing key file: %w", err)
+	}
+	_, err = f.WriteString(hex.EncodeToString(key) + "\n")
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(path) // never leave a truncated key behind
+		return nil, false, fmt.Errorf("writing key file: %w", err)
+	}
+	return key, true, nil
+}
+
+// readKeyFileWait is readKeyFile, retrying for up to keyReadWait while the file is empty or
+// too short: another process may be in the middle of writing it.
+func readKeyFileWait(path string, log *slog.Logger) ([]byte, error) {
+	deadline := time.Now().Add(keyReadWait)
+	for {
+		k, err := readKeyFile(path, log)
+		if err == nil || !(errors.Is(err, errEmptyKey) || errors.Is(err, errShortKey)) || !time.Now().Before(deadline) {
+			return k, err
+		}
+		time.Sleep(keyReadPause)
+	}
+}
+
+var (
+	errEmptyKey = errors.New("empty")
+	errShortKey = errors.New("too short")
+)
 
 func readKeyFile(path string, log *slog.Logger) ([]byte, error) {
 	b, err := os.ReadFile(path)
@@ -96,6 +148,9 @@ func readKeyFile(path string, log *slog.Logger) ([]byte, error) {
 	}
 	s := strings.TrimSpace(string(b))
 	if len(s) != 2*keySize {
+		if len(s) < 2*keySize {
+			return nil, fmt.Errorf("key file %s is invalid: expected %d hex characters: %w", path, 2*keySize, errShortKey)
+		}
 		return nil, fmt.Errorf("key file %s is invalid: expected %d hex characters", path, 2*keySize)
 	}
 	k, err := hex.DecodeString(s)

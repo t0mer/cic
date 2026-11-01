@@ -286,31 +286,31 @@ func TestMFATokenBoundToUser(t *testing.T) {
 
 func TestMFAChallengeCaps(t *testing.T) {
 	m := newMFAStore(time.Now)
-	victim, _ := m.issue(1)
+	victim, _ := m.issue(1, 0)
 	// one account flooding itself keeps only its newest mfaMaxPerUser challenges
-	first, _ := m.issue(2)
+	first, _ := m.issue(2, 0)
 	for i := 0; i < 3*mfaMaxPerUser; i++ {
-		if _, err := m.issue(2); err != nil {
+		if _, err := m.issue(2, 0); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, ok := m.peek(first); ok {
+	if _, _, ok := m.peek(first); ok {
 		t.Fatal("user's oldest challenge should have been dropped")
 	}
-	if _, ok := m.peek(victim); !ok {
+	if _, _, ok := m.peek(victim); !ok {
 		t.Fatal("another user's challenge was evicted")
 	}
 	// at the global cap new challenges are refused, nobody is evicted
 	m = newMFAStore(time.Now)
-	victim, _ = m.issue(1)
+	victim, _ = m.issue(1, 0)
 	now := time.Now()
 	for u := int64(2); len(m.m) < mfaMaxPending; u++ {
 		m.m[mfaKey(string(rune(u))+"x")] = &challenge{userID: u, created: now, expires: now.Add(mfaTTL)}
 	}
-	if _, err := m.issue(999_999); err != errMFAFull {
+	if _, err := m.issue(999_999, 0); err != errMFAFull {
 		t.Fatalf("want errMFAFull, got %v", err)
 	}
-	if _, ok := m.peek(victim); !ok || len(m.m) != mfaMaxPending {
+	if _, _, ok := m.peek(victim); !ok || len(m.m) != mfaMaxPending {
 		t.Fatal("full store evicted a challenge")
 	}
 }
@@ -499,5 +499,71 @@ func TestSetupWithoutKeyIs503(t *testing.T) {
 	}
 	if rec := c.post("/api/auth/2fa/enable", map[string]string{"code": "123456"}); rec.Code != 503 {
 		t.Fatalf("enable w/o key: %d", rec.Code)
+	}
+}
+
+// A password login that read the user before two-factor was enabled must not end up with a
+// password-only session: the session insert re-checks the live flag.
+func TestLoginRacingTwoFactorEnableGetsChallenge(t *testing.T) {
+	s, clk := newSvc(t, false)
+	withKey(t, s)
+	u := mustUser(t, s, "alice", RoleViewer, false)
+	c := newClient(t, s)
+	fired := false
+	s.Store().afterLoginRead = func() {
+		if fired {
+			return
+		}
+		fired = true
+		// the enable flow completes (flag set, other sessions revoked) mid-login
+		enableTOTP(t, s.Store(), u, clk.Now())
+	}
+	rec := c.login("alice", goodPW)
+	if !fired {
+		t.Fatal("race hook never ran")
+	}
+	if rec.Code != 200 || len(rec.Result().Cookies()) != 0 || c.cookie != nil {
+		t.Fatalf("login %d cookies=%v body=%s", rec.Code, rec.Result().Cookies(), rec.Body)
+	}
+	var v struct {
+		MFA bool `json:"mfa_required"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &v)
+	if !v.MFA {
+		t.Fatalf("want mfa_required, got %s", rec.Body)
+	}
+	var n int
+	if err := s.store.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE user_id = ?`, u.ID).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("a session exists (n=%d err=%v)", n, err)
+	}
+}
+
+// Losing the race must not clear the account's password-failure counter.
+func TestLoginRaceFallbackKeepsFailureCount(t *testing.T) {
+	s, clk := newSvc(t, false)
+	withKey(t, s)
+	u := mustUser(t, s, "alice", RoleViewer, false)
+	c := newClient(t, s)
+	for i := 0; i < 3; i++ {
+		if rec := c.login("alice", "wrong-password-"+strings.Repeat("x", i)); rec.Code != 401 {
+			t.Fatalf("setup guess %d: %d", i, rec.Code)
+		}
+	}
+	fired := false
+	s.Store().afterLoginRead = func() {
+		if !fired {
+			fired = true
+			enableTOTP(t, s.Store(), u, clk.Now())
+		}
+	}
+	if rec := c.login("alice", goodPW); !strings.Contains(rec.Body.String(), "mfa_required") {
+		t.Fatalf("want challenge, got %d %s", rec.Code, rec.Body)
+	}
+	// 3 failures are still on the account: two more reach the threshold of 5
+	for i := 0; i < 2; i++ {
+		c.login("alice", "wrong-again")
+	}
+	if rec := c.login("alice", goodPW); rec.Code != 429 {
+		t.Fatalf("failure counter was cleared: got %d", rec.Code)
 	}
 }

@@ -1,6 +1,7 @@
 import { LogOut, UserRound } from 'lucide-react'
 import { DropdownMenu } from 'radix-ui'
 
+import { confirmLeave } from '@/lib/leave-guard'
 import { useAuth } from './auth-context'
 
 export function UserMenu() {
@@ -29,7 +30,7 @@ export function UserMenu() {
           </div>
           <DropdownMenu.Separator className="my-1 h-px bg-border" />
           <DropdownMenu.Item
-            onSelect={() => void logout()}
+            onSelect={() => confirmLeave() && void logout()}
             className="flex h-11 cursor-default items-center gap-2 rounded-sm px-3 text-sm outline-none data-[highlighted]:bg-accent"
           >
             <LogOut className="size-4" aria-hidden="true" />

@@ -443,49 +443,70 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if u.TOTPEnabled {
-		// Password right, second factor still owed: no session yet. The attempt is
-		// refunded WITHOUT clearing any failure count (Cancel, not Success): the password
-		// failure counters only reset once the second factor passes, so a stream of
-		// correct-password / never-finishes logins cannot be used to launder failures, and
-		// the real guessing (the second factor) is limited on the same user:/ip: keys.
-		att.Cancel()
-		token, err := s.mfa.issue(u.ID)
-		if errors.Is(err, errMFAFull) {
-			w.Header().Set("Retry-After", "30")
-			writeError(w, http.StatusServiceUnavailable, "too many sign-ins in progress, try again shortly")
-			return
-		}
-		if err != nil {
-			s.log.Error("creating mfa challenge", "err", err)
-			writeError(w, http.StatusInternalServerError, "internal error")
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"mfa_required": true, "mfa_token": token})
+		s.challenge(w, att, u)
+		return
+	}
+	// u was read before the (slow) password check, so two-factor may have been enabled in
+	// the meantime. The insert itself re-checks the flag; a lost race turns into a challenge,
+	// so the attempt is only settled afterwards (a challenge must not clear failure counters).
+	if !s.startSession(w, r, u, true, -1) {
+		s.challenge(w, att, u)
 		return
 	}
 	// Only the account's own counter is cleared: the source address keeps its failures, so
 	// logging in to one's own account cannot launder guesses against others.
 	att.Success(userKey)
-	s.startSession(w, r, u)
+}
+
+// challenge answers a correct password of a two-factor account: no session yet, only a
+// short-lived token to present with the second factor. The attempt is refunded WITHOUT
+// clearing any failure count (Cancel, not Success): the password failure counters only
+// reset once the second factor passes, so a stream of correct-password / never-finishes
+// logins cannot be used to launder failures, and the real guessing (the second factor) is
+// limited on the same user:/ip: keys.
+func (s *Service) challenge(w http.ResponseWriter, att *Attempt, u User) {
+	att.Cancel()
+	token, err := s.mfa.issue(u.ID, u.AuthGen)
+	if errors.Is(err, errMFAFull) {
+		w.Header().Set("Retry-After", "30")
+		writeError(w, http.StatusServiceUnavailable, "too many sign-ins in progress, try again shortly")
+		return
+	}
+	if err != nil {
+		s.log.Error("creating mfa challenge", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"mfa_required": true, "mfa_token": token})
 }
 
 // startSession replaces any pre-login session with a fresh one, records the login and
-// answers with the session view.
-func (s *Service) startSession(w http.ResponseWriter, r *http.Request, u User) {
+// answers with the session view. With only2FAOff it creates the session only while the
+// account still has no second factor and reports false, having written nothing, when
+// two-factor was enabled in the meantime.
+func (s *Service) startSession(w http.ResponseWriter, r *http.Request, u User, only2FAOff bool, gen int64) bool {
 	if c, err := r.Cookie(s.CookieName()); err == nil {
 		_ = s.store.DeleteSession(r.Context(), c.Value) // never reuse a pre-login session
 	}
-	token, sess, err := s.store.CreateSession(r.Context(), u.ID, r.UserAgent())
+	token, sess, err := s.store.createSession(r.Context(), u.ID, r.UserAgent(), only2FAOff, gen)
+	if errors.Is(err, ErrSecondFactorRequired) {
+		return false
+	}
+	if errors.Is(err, errAuthChanged) {
+		writeError(w, http.StatusUnauthorized, "login expired, sign in again")
+		return true
+	}
 	if err != nil {
 		s.log.Error("creating session", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
-		return
+		return true
 	}
 	if err := s.store.TouchLogin(r.Context(), u.ID); err != nil {
 		s.log.Warn("recording login time", "err", err)
 	}
 	s.setCookie(w, token)
 	writeJSON(w, http.StatusOK, sessionView{User: viewOf(u), CSRFToken: sess.CSRFToken})
+	return true
 }
 
 func (s *Service) logout(w http.ResponseWriter, r *http.Request) {

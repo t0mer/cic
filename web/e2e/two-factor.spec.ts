@@ -40,6 +40,20 @@ for (const vp of [
 
       const close = dialog.getByRole('button', { name: 'Close', exact: true }).last()
       await expect(close).toBeDisabled()
+
+      // History navigation from the codes screen asks first; declining keeps the codes
+      const prompts: string[] = []
+      const answer = { accept: false }
+      page.on('dialog', (d) => {
+        if (d.type() === 'confirm') prompts.push(d.message())
+        void (answer.accept ? d.accept() : d.dismiss())
+      })
+      await page.evaluate(() => history.pushState({}, '', '/settings?tab=account#x'))
+      await page.goBack()
+      await expect.poll(() => prompts.length).toBeGreaterThan(0)
+      expect(prompts[0]).toBe('Leave without saving your backup codes?')
+      await expect(dialog.getByTestId('backup-codes')).toContainText(BACKUP_CODE)
+      page.removeAllListeners('dialog')
       await dialog.getByLabel('I have saved these codes').check()
       await close.click()
       await expect(page.getByTestId('backup-remaining')).toHaveText('10 backup codes remaining')

@@ -170,3 +170,64 @@ func TestUserDisable2FA(t *testing.T) {
 		t.Fatal("unknown user accepted")
 	}
 }
+
+func TestUserDisable2FAEndsSessions(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "u.db")
+	ctx := context.Background()
+	if _, err := runUser(t, dbPath, scripted(), "a long enough password\n", "add", "alice", "--password-stdin"); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := auth.NewStore(db, nil)
+	st.SetSecretKey(bytes.Repeat([]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18}, 2)[:32])
+	u, _, _ := st.UserByName(ctx, "alice")
+	sec, _ := auth.GenerateSecret()
+	if err := st.SetPendingTOTP(ctx, u.ID, sec); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := auth.Code(sec, auth.TOTPStep(time.Now()))
+	if _, err := st.EnableTOTP(ctx, u.ID, c, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	tok, _, err := st.CreateSession(ctx, u.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A failing revocation must fail the command and change nothing.
+	if _, err := db.Exec(`CREATE TRIGGER t BEFORE DELETE ON sessions BEGIN SELECT RAISE(ABORT, 'boom'); END`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	out, err := runUser(t, dbPath, scripted(), "", "disable-2fa", "alice")
+	if err == nil || strings.Contains(out, "disabled for alice") {
+		t.Fatalf("claimed recovery despite revocation failure: %v %q", err, out)
+	}
+	db, _ = store.Open(ctx, dbPath)
+	st = auth.NewStore(db, nil)
+	if en, _, _ := st.TOTPState(ctx, u.ID); !en {
+		t.Fatal("factor cleared although the command failed")
+	}
+	if _, _, err := st.Check(ctx, tok); err != nil {
+		t.Fatalf("session lost on failed command: %v", err)
+	}
+	if _, err := db.Exec(`DROP TRIGGER t`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	if out, err := runUser(t, dbPath, scripted(), "", "disable-2fa", "alice"); err != nil || !strings.Contains(out, "disabled for alice") {
+		t.Fatalf("%v %q", err, out)
+	}
+	db, _ = store.Open(ctx, dbPath)
+	defer db.Close()
+	st = auth.NewStore(db, nil)
+	if en, _, _ := st.TOTPState(ctx, u.ID); en {
+		t.Fatal("2fa still on")
+	}
+	if _, _, err := st.Check(ctx, tok); !errors.Is(err, auth.ErrNoSession) {
+		t.Fatalf("session survived disable-2fa: %v", err)
+	}
+}
