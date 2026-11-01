@@ -95,6 +95,7 @@ type Store struct {
 	watchers map[*watcher]struct{}
 	key      []byte // encrypts TOTP secrets; nil disables the TOTP methods
 
+	afterLoginRead  func() // test seam: runs in createSession just before the insert
 	afterEnableRead func() // test seam: runs in EnableTOTP between the read and the write
 }
 
@@ -336,6 +337,12 @@ func trimUA(ua string) string {
 
 // CreateSession starts a session and returns its secret token (shown only once).
 func (s *Store) CreateSession(ctx context.Context, userID int64, userAgent string) (token string, sess Session, err error) {
+	return s.createSession(ctx, userID, userAgent, false)
+}
+
+// createSession is CreateSession; with only2FAOff it inserts only while the user has no
+// second factor and returns ErrSecondFactorRequired otherwise.
+func (s *Store) createSession(ctx context.Context, userID int64, userAgent string, only2FAOff bool) (token string, sess Session, err error) {
 	if token, err = randToken(32); err != nil {
 		return "", Session{}, err
 	}
@@ -346,10 +353,20 @@ func (s *Store) CreateSession(ctx context.Context, userID int64, userAgent strin
 	now := s.now().Unix()
 	sess = Session{IDHash: hashToken(token), UserID: userID, CSRFToken: csrf,
 		CreatedAt: time.Unix(now, 0).UTC(), LastSeen: time.Unix(now, 0).UTC(), UserAgent: trimUA(userAgent)}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO sessions(id_hash, user_id, csrf_token, created_at, last_seen, user_agent)
-		VALUES (?, ?, ?, ?, ?, ?)`, sess.IDHash, userID, csrf, now, now, sess.UserAgent)
+	if s.afterLoginRead != nil {
+		s.afterLoginRead()
+	}
+	// A single statement decides on the live two-factor flag, so a login that read the user
+	// before two-factor was enabled cannot slip a password-only session in afterwards (the
+	// enable flow sets the flag first and only then revokes the other sessions).
+	res, err := s.db.ExecContext(ctx, `INSERT INTO sessions(id_hash, user_id, csrf_token, created_at, last_seen, user_agent)
+		SELECT ?, ?, ?, ?, ?, ? WHERE ? = 0 OR EXISTS (SELECT 1 FROM users WHERE id = ? AND totp_enabled = 0)`,
+		sess.IDHash, userID, csrf, now, now, sess.UserAgent, only2FAOff, userID)
 	if err != nil {
 		return "", Session{}, fmt.Errorf("inserting session: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return "", Session{}, ErrSecondFactorRequired
 	}
 	if err := s.evictOverCap(ctx, userID); err != nil {
 		return "", Session{}, err

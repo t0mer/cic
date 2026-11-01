@@ -28,6 +28,8 @@ var (
 	ErrTOTPNotEnabled = errors.New("two-factor authentication is not enabled")
 	// ErrBadCode is returned for a wrong, replayed or already used code.
 	ErrBadCode = errors.New("invalid code")
+	// ErrSecondFactorRequired means two-factor was enabled before a password-only session could be created.
+	ErrSecondFactorRequired = errors.New("second factor required")
 )
 
 // Factor says which second factor VerifySecondFactor accepted.

@@ -86,7 +86,7 @@ func (s *Service) login2FA(w http.ResponseWriter, r *http.Request) {
 	if f == FactorBackup {
 		s.auditEvent(r.Context(), u.Username, "2fa_login", "factor=backup_code")
 	}
-	s.startSession(w, r, u)
+	s.startSession(w, r, u, false)
 }
 
 // twoFAServerError answers a non-verdict failure: 503 without a key, 500 otherwise. A
