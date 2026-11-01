@@ -39,7 +39,7 @@ func TestDefaults(t *testing.T) {
 	if err := c.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if c.Server.Listen != ":8080" || c.Storage.Path != "/data/cic.db" || c.MQTT.Broker.Port != 1883 ||
+	if c.Server.Listen != ":8080" || c.Storage.Path != DefaultStoragePath() || c.MQTT.Broker.Port != 1883 ||
 		c.Devices.OfflineAfter != 5*time.Minute || c.Geocode.MaxAge != 24*time.Hour ||
 		c.Audit.Retention != 2160*time.Hour || !c.Geocode.Enabled || c.Map.Provider != "openfreemap" ||
 		len(c.MQTT.Prefixes) != 1 || c.MQTT.Prefixes[0] != "dradis" || c.Commands.SMSDailyCap != 50 || c.Devices.MaxDevices != 500 ||
