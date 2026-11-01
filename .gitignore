@@ -82,3 +82,6 @@ web/test-results/
 web/playwright-report/
 web/*.tsbuildinfo
 /cic
+
+# External code-review output — local only
+qodo.md
