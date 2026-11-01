@@ -109,6 +109,12 @@ func normalizePath(goos, path string) (string, error) {
 		if strings.Contains(path, "/") {
 			return "", fmt.Errorf("database path %q: '/' is not a separator in an extended-length path; use '\\'", path)
 		}
+		// A colon is only valid as the drive delimiter (alternate data streams and device
+		// names such as NUL: are not supported for the database file).
+		colons, drive := strings.Count(path, ":"), len(path) > 1 && path[1] == ':'
+		if (drive && colons != 1) || (!drive && colons != 0) {
+			return "", fmt.Errorf("database path %q contains a ':' outside the drive letter", path)
+		}
 		if strings.Contains(path[2:], `\\`) { // empty component (the leading pair of a UNC path excepted)
 			return "", fmt.Errorf("database path %q has an empty component that Windows would collapse without the extended-length prefix", path)
 		}
@@ -133,15 +139,24 @@ func normalizePath(goos, path string) (string, error) {
 // is an ordinary file, without it Windows opens the device.
 func reservedDOSName(part string) bool {
 	base := part
-	if i := strings.IndexByte(base, '.'); i >= 0 {
+	if i := strings.IndexAny(base, ".:"); i >= 0 { // NUL.db, NUL:stream, NUL:
 		base = base[:i]
 	}
 	base = strings.ToUpper(strings.TrimRight(base, " "))
 	switch base {
-	case "CON", "PRN", "AUX", "NUL":
+	case "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$":
 		return true
 	}
-	return len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) && base[3] >= '1' && base[3] <= '9'
+	// COM1-9 and LPT1-9, and the superscript digits ¹ ² ³ that Windows also accepts.
+	for _, p := range []string{"COM", "LPT"} {
+		if rest, ok := strings.CutPrefix(base, p); ok {
+			switch rest {
+			case "1", "2", "3", "4", "5", "6", "7", "8", "9", "\u00b9", "\u00b2", "\u00b3":
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // maxWindowsPath keeps well below SQLite's 1040-byte Windows VFS pathname limit.
