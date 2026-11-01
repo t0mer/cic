@@ -213,53 +213,161 @@ func (s *server) deviceRoutes(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.loadDevice(w, r, key); !ok {
 		return
 	}
-	pts, _, err := s.readPoints(r.Context(), key, from, to)
+	days, err := s.streamDays(r.Context(), key, from, to, loc)
 	if err != nil {
 		s.internalError(w, "reading location history", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, struct {
 		Days []routeDay `json:"days"`
-	}{buildDays(pts, loc)})
+	}{days})
 }
 
-// buildDays groups time-ordered points by local calendar day, splits each day into segments
-// at gaps over tripGap and simplifies the segment geometry.
+// Caps on the geometry the routes endpoint keeps in memory and returns. Counts, distances, day
+// grouping and trip breaks are computed from every matching row; only the geometry is bounded.
+// Variables so tests can lower them.
+var (
+	routeSegmentBuffer = 50000 // points one open segment buffers before it is simplified in place
+	routeDayVertices   = 20000 // geometry vertices kept per day
+)
+
+// dayBuilder groups time-ordered points by local calendar day, splits each day into segments
+// at gaps over tripGap and simplifies the segment geometry, one point at a time.
+type dayBuilder struct {
+	loc  *time.Location
+	days []routeDay
+	seg  []histPoint // current segment: simplified in place whenever it outgrows routeSegmentBuffer
+	cur  *routeDay
+	prev histPoint // previous point of the current segment (exact distances)
+}
+
+func newDayBuilder(loc *time.Location) *dayBuilder {
+	return &dayBuilder{loc: loc, days: []routeDay{}}
+}
+
+func (b *dayBuilder) flush() {
+	if b.cur != nil && len(b.seg) > 1 {
+		b.cur.Segments = append(b.cur.Segments, simplify(b.seg, simplifyToleranceM))
+		if vertices(b.cur.Segments) > 2*routeDayVertices {
+			thinDay(b.cur, routeDayVertices)
+		}
+	}
+	b.seg = b.seg[:0]
+}
+
+func (b *dayBuilder) add(p histPoint) {
+	date := time.Unix(p.T, 0).In(b.loc).Format("2006-01-02")
+	if b.cur == nil || b.cur.Date != date {
+		b.flush()
+		if b.cur != nil {
+			thinDay(b.cur, routeDayVertices)
+		}
+		b.days = append(b.days, routeDay{Date: date, First: p.T, Segments: [][][3]float64{}})
+		b.cur = &b.days[len(b.days)-1]
+	} else if len(b.seg) > 0 && time.Duration(p.T-b.prev.T)*time.Second > tripGap {
+		b.flush()
+	}
+	if len(b.seg) > 0 {
+		b.cur.DistanceM += geo.Haversine(b.prev.Lat, b.prev.Lon, p.Lat, p.Lon)
+	}
+	b.seg = append(b.seg, p)
+	b.prev = p
+	if len(b.seg) >= routeSegmentBuffer {
+		b.compact()
+	}
+	b.cur.PointCount++
+	b.cur.Last = p.T
+}
+
+// compact simplifies the open segment in place, keeping its endpoints, and stride-thins it if the
+// simplification alone did not make room.
+func (b *dayBuilder) compact() {
+	kept := simplify(b.seg, simplifyToleranceM)
+	if len(kept) > routeSegmentBuffer/2 {
+		kept = strideThin(kept, routeSegmentBuffer/2)
+	}
+	b.seg = b.seg[:0]
+	for _, k := range kept {
+		b.seg = append(b.seg, histPoint{T: int64(k[2]), Lat: k[0], Lon: k[1]})
+	}
+}
+
+func (b *dayBuilder) finish() []routeDay {
+	b.flush()
+	if b.cur != nil {
+		thinDay(b.cur, routeDayVertices)
+	}
+	for i := range b.days {
+		b.days[i].DistanceM = math.Round(b.days[i].DistanceM*10) / 10
+	}
+	return b.days
+}
+
+func vertices(segs [][][3]float64) (n int) {
+	for _, s := range segs {
+		n += len(s)
+	}
+	return n
+}
+
+// strideThin picks n evenly spaced vertices, always including the first and last.
+func strideThin(v [][3]float64, n int) [][3]float64 {
+	if len(v) <= n || n < 2 {
+		return v
+	}
+	out := make([][3]float64, n)
+	for i := range out {
+		out[i] = v[int(int64(i)*int64(len(v)-1)/int64(n-1))]
+	}
+	return out
+}
+
+// thinDay stride-thins the day's segments, in proportion to their size, to at most budget
+// vertices in all, keeping every segment's endpoints (so each segment keeps at least two).
+func thinDay(d *routeDay, budget int) {
+	total := vertices(d.Segments)
+	if total <= budget {
+		return
+	}
+	for i, s := range d.Segments {
+		d.Segments[i] = strideThin(s, max(2, int(int64(len(s))*int64(budget)/int64(total))))
+	}
+}
+
+// buildDays groups time-ordered points by local calendar day (see dayBuilder).
 func buildDays(pts []histPoint, loc *time.Location) []routeDay {
-	days := []routeDay{}
-	var seg []histPoint // current segment, unsimplified
-	var cur *routeDay
-	flush := func() {
-		if cur == nil || len(seg) == 0 {
-			seg = seg[:0]
-			return
-		}
-		for i := 1; i < len(seg); i++ {
-			cur.DistanceM += geo.Haversine(seg[i-1].Lat, seg[i-1].Lon, seg[i].Lat, seg[i].Lon)
-		}
-		if len(seg) > 1 {
-			cur.Segments = append(cur.Segments, simplify(seg, simplifyToleranceM))
-		}
-		seg = seg[:0]
-	}
+	b := newDayBuilder(loc)
 	for _, p := range pts {
-		date := time.Unix(p.T, 0).In(loc).Format("2006-01-02")
-		if cur == nil || cur.Date != date {
-			flush()
-			days = append(days, routeDay{Date: date, First: p.T, Segments: [][][3]float64{}})
-			cur = &days[len(days)-1]
-		} else if len(seg) > 0 && time.Duration(p.T-seg[len(seg)-1].T)*time.Second > tripGap {
-			flush()
+		b.add(p)
+	}
+	return b.finish()
+}
+
+// streamDays is buildDays over every matching row, read through a cursor so memory stays bounded
+// whatever the density of the range.
+func (s *server) streamDays(ctx context.Context, key string, from, to time.Time, loc *time.Location) ([]routeDay, error) {
+	b := newDayBuilder(loc)
+	if s.History == nil {
+		return b.finish(), nil
+	}
+	rows, err := s.History.QueryContext(ctx,
+		`SELECT ts, lat, lon FROM location_points WHERE device_key = ? AND ts >= ? AND ts <= ? ORDER BY ts`,
+		key, from.Unix(), to.Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var p histPoint
+		if err := rows.Scan(&p.T, &p.Lat, &p.Lon); err != nil {
+			return nil, err
 		}
-		seg = append(seg, p)
-		cur.PointCount++
-		cur.Last = p.T
+		b.add(p)
 	}
-	flush()
-	for i := range days {
-		days[i].DistanceM = math.Round(days[i].DistanceM*10) / 10
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
-	return days
+	return b.finish(), nil
 }
 
 // simplify applies Douglas-Peucker with tolerance tol (metres), keeping both endpoints, and

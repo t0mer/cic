@@ -404,3 +404,60 @@ func hasT(p [][3]float64, t float64) bool {
 	}
 	return false
 }
+
+// genPts inserts n zig-zag fixes 10 s apart starting at t0 straight in SQL.
+func genPts(t *testing.T, key string, t0 int64, n int) {
+	t.Helper()
+	if _, err := testDB.Exec(`WITH RECURSIVE g(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM g WHERE i < ?)
+		INSERT INTO location_points(device_key, ts, lat, lon) SELECT ?, ? + i*10, 32 + (i % 2) * 0.001, 34 + i * 1e-6 FROM g`,
+		n-1, key, t0); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRoutesExactBeyondRowCap(t *testing.T) {
+	historyMaxRows = 100
+	t.Cleanup(func() { historyMaxRows = historyDefaultMaxRows })
+	e := histEnv(t)
+	const n = 450
+	t0 := int64(1700006400 + 3600)
+	genPts(t, "dradis/a", t0, n)
+	var want float64
+	for i := 1; i < n; i++ {
+		want += geo.Haversine(32+float64((i-1)%2)*0.001, 34+float64(i-1)*1e-6, 32+float64(i%2)*0.001, 34+float64(i)*1e-6)
+	}
+	r := decodeRoutes(t, getHist(e, "admin", "/api/devices/dradis/a/routes?tz=UTC&from="+rfc(t0-100)+"&to="+rfc(t0+86000)))
+	if len(r.Days) != 1 || r.Days[0].PointCount != n || len(r.Days[0].Segments) != 1 {
+		t.Fatalf("%+v", r.Days)
+	}
+	if math.Abs(r.Days[0].DistanceM-want) > 0.1 {
+		t.Errorf("distance %v want %v", r.Days[0].DistanceM, want)
+	}
+	if r.Days[0].Last != t0+int64(n-1)*10 {
+		t.Errorf("last %d", r.Days[0].Last)
+	}
+}
+
+func TestRoutesGeometryBounded(t *testing.T) {
+	routeSegmentBuffer, routeDayVertices = 64, 100
+	t.Cleanup(func() { routeSegmentBuffer, routeDayVertices = 50000, 20000 })
+	e := histEnv(t)
+	const n = 2000
+	t0 := int64(1700006400 + 3600)
+	genPts(t, "dradis/a", t0, n)
+	r := decodeRoutes(t, getHist(e, "admin", "/api/devices/dradis/a/routes?tz=UTC&from="+rfc(t0-100)+"&to="+rfc(t0+86000)))
+	d := r.Days[0]
+	if d.PointCount != n || d.DistanceM < float64(n-1)*100 { // each hop is ~111 m
+		t.Fatalf("count %d distance %v", d.PointCount, d.DistanceM)
+	}
+	v := 0
+	for _, s := range d.Segments {
+		v += len(s)
+		if s[0][2] != float64(t0) || s[len(s)-1][2] != float64(t0+int64(n-1)*10) {
+			t.Errorf("segment ends %v %v", s[0], s[len(s)-1])
+		}
+	}
+	if v > 120 || v < 2 {
+		t.Errorf("vertices %d", v)
+	}
+}
