@@ -3,7 +3,9 @@ package devices
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -78,7 +80,7 @@ type Registry struct {
 	hooks        []func(Device)
 	annotate     func(*Device)
 	removeHooks  []func(Device)
-	locHooks     []func(key string, ts int64, lat, lon float64, accuracy *float64)
+	locHooks     []func(key string, incarnation int64, ts int64, lat, lon float64, accuracy *float64)
 	refreshHooks []func()
 }
 
@@ -134,8 +136,9 @@ func (r *Registry) OnRemove(fn func(Device)) {
 }
 
 // OnLocation registers fn to be called, synchronously after the commit, for every location
-// update that was applied (not for stale fixes). ts is the phone's own fix time. Keep fn quick.
-func (r *Registry) OnLocation(fn func(key string, ts int64, lat, lon float64, accuracy *float64)) {
+// update that was applied (not for stale fixes). incarnation identifies the device row the update
+// was applied to (it changes whenever the key is deleted and recreated). ts is the phone's own fix time. Keep fn quick.
+func (r *Registry) OnLocation(fn func(key string, incarnation int64, ts int64, lat, lon float64, accuracy *float64)) {
 	r.mu.Lock()
 	r.locHooks = append(r.locHooks, fn)
 	r.mu.Unlock()
@@ -185,11 +188,12 @@ func (r *Registry) Apply(ctx context.Context, ev mqtt.Event) error {
 	defer tx.Rollback() //nolint:errcheck // no-op after commit
 
 	// Inserts only when the device exists already or the cap allows another one.
-	res, err := tx.ExecContext(ctx, `INSERT INTO devices(key, prefix, device, last_seen, created_at)
-		SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM devices WHERE key = ?)
+	// A new row gets a random 63-bit incarnation (see newIncarnation).
+	res, err := tx.ExecContext(ctx, `INSERT INTO devices(key, prefix, device, last_seen, created_at, incarnation)
+		SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM devices WHERE key = ?)
 			OR ? <= 0 OR (SELECT COUNT(*) FROM devices) < ?
 		ON CONFLICT(key) DO NOTHING`,
-		key, ev.Prefix, ev.Device, seen, ev.ReceivedAt.Unix(), key, r.maxDevices, r.maxDevices)
+		key, ev.Prefix, ev.Device, seen, ev.ReceivedAt.Unix(), newIncarnation(), key, r.maxDevices, r.maxDevices)
 	if err != nil {
 		return fmt.Errorf("creating device %q: %w", key, err)
 	}
@@ -223,6 +227,12 @@ func (r *Registry) Apply(ctx context.Context, ev mqtt.Event) error {
 		}
 		return fmt.Errorf("device %q: %w", key, ErrDeviceVanished)
 	}
+	var inc int64
+	if applied != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT incarnation FROM devices WHERE key = ?`, key).Scan(&inc); err != nil {
+			return fmt.Errorf("reading incarnation of device %q: %w", key, err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("committing update of device %q: %w", key, err)
 	}
@@ -232,10 +242,26 @@ func (r *Registry) Apply(ctx context.Context, ev mqtt.Event) error {
 		hooks := slices.Clone(r.locHooks)
 		r.mu.RUnlock()
 		for _, fn := range hooks {
-			fn(key, locationTime(ev, *applied), applied.Latitude, applied.Longitude, applied.GPSAccuracy)
+			fn(key, inc, locationTime(ev, *applied), applied.Latitude, applied.Longitude, applied.GPSAccuracy)
 		}
 	}
 	return nil
+}
+
+// newIncarnation returns a random positive 63-bit identifier for a new device row. Unlike
+// MAX(incarnation)+1 it cannot be reused after the newest row is deleted, and unlike created_at
+// it distinguishes a delete and recreate within the same second; a collision has probability
+// ~2^-63 per pair. Existing rows keep the migration default 0.
+func newIncarnation() int64 {
+	var b [8]byte
+	for {
+		if _, err := rand.Read(b[:]); err != nil {
+			panic(fmt.Sprintf("crypto/rand: %v", err)) // never happens on supported platforms
+		}
+		if v := int64(binary.BigEndian.Uint64(b[:]) >> 1); v > 0 {
+			return v
+		}
+	}
 }
 
 func locationTime(ev mqtt.Event, loc mqtt.Location) int64 {
