@@ -83,10 +83,10 @@ func (s *Service) login2FA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	att.Success(userKey)
-	if f == FactorBackup {
+	// Audited only once a session was really issued, never for a login that then failed.
+	if s.startSession(w, r, u, false, u.AuthGen) == sessionIssued && f == FactorBackup {
 		s.auditEvent(r.Context(), u.Username, "2fa_login", "factor=backup_code")
 	}
-	s.startSession(w, r, u, false, u.AuthGen)
 }
 
 // twoFAServerError answers a non-verdict failure: 503 without a key, 500 otherwise. A
