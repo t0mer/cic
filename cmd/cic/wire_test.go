@@ -495,3 +495,25 @@ func TestUnknownOutcomeSMSThenSweepUpdatesAuditAndEvent(t *testing.T) {
 	}
 	waitStatus(t, aud, "no_confirmation")
 }
+
+func TestStartHistoryPurgesWhileRecordingDisabled(t *testing.T) {
+	db := openDB(t)
+	old := time.Now().Add(-48 * time.Hour).Unix()
+	if _, err := db.Exec(`INSERT INTO location_points(device_key, ts, lat, lon) VALUES ('dradis/p', ?, 1, 1)`, old); err != nil {
+		t.Fatal(err)
+	}
+	reg := devices.NewRegistry(db, time.Minute, quiet)
+	ctx, cancel := context.WithCancel(context.Background())
+	wait := startHistory(ctx, db, reg, config.LocationsConfig{Enabled: false, Retention: 24 * time.Hour}, quiet)
+	deadline := time.Now().Add(5 * time.Second)
+	n := 1
+	for n != 0 && time.Now().Before(deadline) {
+		db.QueryRow(`SELECT COUNT(*) FROM location_points`).Scan(&n)
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	wait()
+	if n != 0 {
+		t.Fatal("retention janitor did not run with recording disabled")
+	}
+}

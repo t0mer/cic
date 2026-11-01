@@ -25,6 +25,10 @@ func TestRegistryApplyRecordsThinnedPoints(t *testing.T) {
 	reg := devices.NewRegistry(db, 5*time.Minute, log)
 	rec := history.New(db, history.Config{Retention: 24 * time.Hour, MinDistanceM: 25, MinInterval: 5 * time.Minute}, log)
 	reg.OnLocation(rec.OnLocation)
+	wctx, stop := context.WithCancel(ctx)
+	writerDone := make(chan struct{})
+	go func() { rec.RunWriter(wctx); close(writerDone) }()
+	defer func() { stop(); <-writerDone }()
 	reg.OnRemove(func(d devices.Device) { rec.Forget(d.Key) })
 
 	now := time.Now()
@@ -37,7 +41,9 @@ func TestRegistryApplyRecordsThinnedPoints(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// The writer is asynchronous: wait until the queue has been persisted.
 	count := func() (n int) {
+		time.Sleep(150 * time.Millisecond)
 		db.QueryRow(`SELECT COUNT(*) FROM location_points`).Scan(&n)
 		return
 	}

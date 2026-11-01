@@ -3,10 +3,13 @@ package history
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"io"
 	"log/slog"
 	"math"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -184,19 +187,6 @@ func TestPurgePerDeviceCap(t *testing.T) {
 	}
 }
 
-func TestDeleteDevice(t *testing.T) {
-	r, count := newRec(t, cfg())
-	rec(t, r, key, t0.Unix()-100, 32, 34)
-	rec(t, r, "dradis/other", t0.Unix()-100, 32, 34)
-	if err := r.DeleteDevice(context.Background(), key); err != nil || count() != 1 {
-		t.Fatalf("delete: %v, count %d", err, count())
-	}
-	rec(t, r, key, t0.Unix()-90, 32, 34) // cache cleared: stored, not thinned
-	if count() != 2 {
-		t.Fatal("cache not cleared on delete")
-	}
-}
-
 func TestDescendingReplayIsThinned(t *testing.T) {
 	r, count := newRec(t, cfg())
 	base := t0.Unix() - 100
@@ -249,28 +239,201 @@ func TestRecordAfterDeviceDeleteLeavesNoOrphan(t *testing.T) {
 	}
 }
 
-func TestRecordNotBlockedByPurge(t *testing.T) {
+func TestPurgeAndRecordAreMutuallyExclusive(t *testing.T) {
 	r, count := newRec(t, cfg())
-	rec(t, r, key, t0.Unix()-100, 32, 34)
+	r.now = func() time.Time { return t0.Add(-time.Hour) }
+	cutoff := t0.Unix() - 24*3600
+	rec(t, r, key, cutoff-1, 32, 34)       // still valid then; cached as the last point
+	r.now = func() time.Time { return t0 } // now it has just expired
 	done := make(chan struct{})
-	r.afterDeletes = func() { // runs inside purge, after its DELETEs
+	r.afterDeletes = func() { // inside purge's critical section, after its DELETE
 		go func() {
-			rec(t, r, key, t0.Unix()-50, 40, 40)
+			rec(t, r, key, cutoff+1, 32, 34) // valid, 2 s from the deleted point: thinned if the cache were stale
 			close(done)
 		}()
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Error("Record blocked while purge was running")
+			t.Error("Record ran inside the purge critical section")
+		case <-time.After(100 * time.Millisecond):
 		}
 	}
-	if _, err := r.Purge(context.Background()); err != nil {
+	if n, err := r.Purge(context.Background()); err != nil || n != 1 {
+		t.Fatalf("purge = %d, %v", n, err)
+	}
+	r.afterDeletes = nil
+	<-done
+	if count() != 1 {
+		t.Fatalf("new fix lost to a stale cache: %d rows", count())
+	}
+}
+
+func TestPurgeBatches(t *testing.T) {
+	r, count := newRec(t, cfg())
+	if _, err := r.db.Exec(`WITH RECURSIVE g(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM g WHERE i < 12000)
+		INSERT INTO location_points(device_key, ts, lat, lon) SELECT ?, ? + i, 1, 1 FROM g`, key, t0.Unix()-30*3600); err != nil {
 		t.Fatal(err)
 	}
-	if count() != 2 {
-		t.Fatalf("count = %d", count())
+	batches := 0
+	r.afterDeletes = func() { batches++ }
+	n, err := r.Purge(context.Background())
+	if err != nil || n != 12001 || count() != 0 || batches != 3 {
+		t.Fatalf("purge = %d, %v, count %d, batches %d", n, err, count(), batches)
 	}
-	if len(r.last) != 0 {
-		t.Fatal("cache not cleared after purge")
+}
+
+func TestPurgeUsesTimeIndex(t *testing.T) {
+	r, _ := newRec(t, cfg())
+	rows, err := r.db.Query(`EXPLAIN QUERY PLAN DELETE FROM location_points WHERE id IN (SELECT id FROM location_points WHERE ts < ? LIMIT ?)`, 1, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var plan string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan += detail + "\n"
+	}
+	if !strings.Contains(plan, "idx_location_points_ts") {
+		t.Errorf("retention purge does not use the ts index:\n%s", plan)
+	}
+}
+
+func TestJanitorPurgesAfterRecordingDisabled(t *testing.T) {
+	r, count := newRec(t, cfg())
+	rec(t, r, key, t0.Unix()-3600, 32, 34)
+	// A later process start with locations.enabled=false: a fresh Recorder, no writer, only the janitor.
+	r2 := New(r.db, cfg(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	r2.now = func() time.Time { return t0.Add(48 * time.Hour) }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r2.RunJanitor(ctx, 24*time.Hour, time.Hour, slog.Default()); close(done) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for count() != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if count() != 0 {
+		t.Fatalf("expired points kept: %d", count())
+	}
+}
+
+func queued(r *Recorder) []int64 {
+	r.qmu.Lock()
+	defer r.qmu.Unlock()
+	var out []int64
+	for _, f := range r.queue {
+		out = append(out, f.ts)
+	}
+	return out
+}
+
+func TestOnLocationNeverBlocksAndDropsOldest(t *testing.T) {
+	r, _ := newRec(t, cfg())
+	r.queueSize = 4
+	start := time.Now()
+	for i := range 10 { // no writer running: the queue is full from the 5th fix on
+		r.OnLocation(key, int64(100+i), 1, 1, nil)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("OnLocation blocked")
+	}
+	got := queued(r)
+	if len(got) != 4 || got[0] != 106 || got[3] != 109 || r.Dropped() != 6 {
+		t.Fatalf("queue %v dropped %d", got, r.Dropped())
+	}
+}
+
+func TestWriterOrderDrainAndRetry(t *testing.T) {
+	r, _ := newRec(t, cfg())
+	var mu sync.Mutex
+	var order []int64
+	busy := 2
+	r.backoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	r.write = func(_ context.Context, f fix) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if f.ts == 1 && busy > 0 {
+			busy--
+			return errors.New("database is locked (5) (SQLITE_BUSY)")
+		}
+		order = append(order, f.ts)
+		return nil
+	}
+	for i := int64(1); i <= 50; i++ {
+		r.OnLocation(key, i, 1, 1, nil) // queued before the writer starts
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.RunWriter(ctx); close(done) }()
+	r.OnLocation(key, 51, 1, 1, nil)
+	cancel() // shutdown must flush what is queued
+	<-done
+	mu.Lock()
+	defer mu.Unlock()
+	if len(order) != 51 || busy != 0 {
+		t.Fatalf("wrote %d fixes, busy left %d", len(order), busy)
+	}
+	for i, ts := range order {
+		if ts != int64(i+1) {
+			t.Fatalf("order broken at %d: %v", i, order)
+		}
+	}
+}
+
+func TestPersistGivesUpOnPersistentBusyAndNonBusy(t *testing.T) {
+	r, _ := newRec(t, cfg())
+	r.backoff = []time.Duration{time.Millisecond, time.Millisecond}
+	calls := 0
+	r.write = func(context.Context, fix) error { calls++; return errors.New("SQLITE_BUSY") }
+	r.persist(context.Background(), fix{key: key})
+	if calls != 3 {
+		t.Fatalf("busy attempts = %d", calls)
+	}
+	calls = 0
+	r.write = func(context.Context, fix) error { calls++; return errors.New("disk I/O error") }
+	r.persist(context.Background(), fix{key: key})
+	if calls != 1 {
+		t.Fatalf("non-busy attempts = %d", calls)
+	}
+}
+
+func TestShutdownDuringWriteKeepsTheFix(t *testing.T) {
+	r, _ := newRec(t, cfg())
+	ctx, cancel := context.WithCancel(context.Background())
+	var wrote []int64
+	r.write = func(wctx context.Context, f fix) error {
+		if f.ts == 2 {
+			cancel() // SIGTERM arrives while this fix is being written
+			return wctx.Err()
+		}
+		wrote = append(wrote, f.ts)
+		return nil
+	}
+	for i := int64(1); i <= 4; i++ {
+		r.OnLocation(key, i, 1, 1, nil)
+	}
+	r.drain(ctx)
+	got := queued(r)
+	if len(got) != 3 || got[0] != 2 || got[1] != 3 || got[2] != 4 {
+		t.Fatalf("queue after interrupted drain = %v (wrote %v), want [2 3 4]", got, wrote)
+	}
+}
+
+func TestQueueStaysBoundedAfterRequeue(t *testing.T) {
+	r, _ := newRec(t, cfg())
+	r.queueSize = 3
+	r.qmu.Lock()
+	for i := int64(1); i <= 5; i++ { // as left by a shutdown requeue on top of newer fixes
+		r.queue = append(r.queue, fix{key: key, ts: i})
+	}
+	r.qmu.Unlock()
+	r.OnLocation(key, 6, 1, 1, nil)
+	if got := queued(r); len(got) != 3 || got[2] != 6 {
+		t.Fatalf("queue = %v, want 3 entries ending in 6", got)
 	}
 }
