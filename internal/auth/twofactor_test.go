@@ -644,3 +644,34 @@ func TestLoginAtCapRetiresOnlyThePreviousSession(t *testing.T) {
 		}
 	}
 }
+
+// If the session cap cannot be enforced the login fails: no cookie, and the session that
+// was just inserted is taken back so the account stays at the cap.
+func TestLoginFailsWhenCapEnforcementFails(t *testing.T) {
+	s, _ := newSvc(t, false)
+	u := mustUser(t, s, "alice", RoleViewer, false)
+	ctx := context.Background()
+	for i := 0; i < MaxSessionsPerUser; i++ {
+		if _, _, err := s.Store().CreateSession(ctx, u.ID, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db := s.Store().db
+	// mark the existing sessions as the oldest and make deleting those (the cap eviction) fail
+	if _, err := db.Exec(`UPDATE sessions SET last_seen = 1, created_at = 1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER no_evict BEFORE DELETE ON sessions WHEN OLD.last_seen = 1
+		BEGIN SELECT RAISE(ABORT, 'evict blocked'); END`); err != nil {
+		t.Fatal(err)
+	}
+	c := newClient(t, s)
+	rec := c.login("alice", goodPW)
+	if rec.Code != 500 || len(rec.Result().Cookies()) != 0 {
+		t.Fatalf("login %d cookies=%v body=%s", rec.Code, rec.Result().Cookies(), rec.Body)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE user_id = ?`, u.ID).Scan(&n); err != nil || n != MaxSessionsPerUser {
+		t.Fatalf("sessions = %d (err %v), want the cap %d", n, err, MaxSessionsPerUser)
+	}
+}
