@@ -16,9 +16,10 @@ import (
 )
 
 const (
-	sweepEvery        = 5 * time.Second
-	auditPurgeEvery   = time.Hour
-	outcomeWriteLimit = 5 * time.Second
+	sweepEvery          = 5 * time.Second
+	auditPurgeEvery     = time.Hour
+	locationsPurgeEvery = time.Hour
+	outcomeWriteLimit   = 5 * time.Second
 )
 
 // fanoutSink delivers every MQTT event to each sink in order. A panic in one sink is

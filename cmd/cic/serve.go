@@ -27,6 +27,7 @@ import (
 	"github.com/t0mer/cic/internal/devices"
 	"github.com/t0mer/cic/internal/events"
 	"github.com/t0mer/cic/internal/geocode"
+	"github.com/t0mer/cic/internal/history"
 	"github.com/t0mer/cic/internal/mqtt"
 	"github.com/t0mer/cic/internal/places"
 	"github.com/t0mer/cic/internal/secret"
@@ -78,7 +79,7 @@ func uiConfig(cfg *config.Config) api.UIConfig {
 	provider := cfg.Map.Provider
 	light, dark := cfg.EffectiveStyles()
 	return api.UIConfig{Provider: provider, StyleLight: light, StyleDark: dark, Attribution: cfg.Attribution(),
-		GeocodeEnabled: cfg.GeocodeUsable(), MapOrigins: cfg.MapOrigins()}
+		GeocodeEnabled: cfg.GeocodeUsable(), HistoryEnabled: cfg.Locations.Enabled, MapOrigins: cfg.MapOrigins()}
 }
 
 // warnProxyConfig flags the classic reverse-proxy misconfiguration: an https public URL
@@ -108,6 +109,13 @@ func runServe(parent context.Context, cfg *config.Config) error {
 
 	registry := devices.NewRegistry(db, cfg.Devices.OfflineAfter, log)
 	registry.SetMaxDevices(cfg.Devices.MaxDevices)
+	if l := cfg.Locations; l.Enabled {
+		recorder := history.New(db, history.Config{Retention: l.Retention, MinDistanceM: l.MinDistanceM,
+			MinInterval: l.MinInterval, MaxPoints: l.MaxPointsPerDevice}, log)
+		registry.OnLocation(recorder.OnLocation) // before the MQTT client starts
+		registry.OnRemove(func(d devices.Device) { recorder.Forget(d.Key) })
+		go recorder.RunJanitor(ctx, l.Retention, locationsPurgeEvery, log)
+	}
 	placeStore, err := places.NewStore(ctx, db)
 	if err != nil {
 		return fmt.Errorf("loading safe places: %w", err)
@@ -161,7 +169,7 @@ func runServe(parent context.Context, cfg *config.Config) error {
 	defer relay.Close() // runs before db.Close
 	correlator := newCorrelator(relay, nil)
 	go runSweeper(ctx, correlator, sweepEvery, time.Now)
-	deps := api.Deps{Devices: registry, DB: db, Hub: hub, Log: log, Auth: authSvc, Audit: auditLog, Places: placeStore, UI: uiConfig(cfg)}
+	deps := api.Deps{Devices: registry, DB: db, Hub: hub, Log: log, Auth: authSvc, Audit: auditLog, Places: placeStore, History: db, UI: uiConfig(cfg)}
 	if cfg.GeocodeKeyIsPublic() {
 		log.Error("geocode disabled: the configured key is a public maps key; set the LatLng server key (latlng_…) in CIC_GEOCODE_API_KEY and put the pk_ key in CIC_MAP_LATLNG_MAPS_KEY")
 	}

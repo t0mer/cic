@@ -48,6 +48,12 @@ func TestUIConfigFromConfig(t *testing.T) {
 				t.Fatal(err)
 			}
 			ui := uiConfig(cfg)
+			if ui.HistoryEnabled != cfg.Locations.Enabled || !ui.HistoryEnabled {
+				t.Fatalf("history_enabled = %v", ui.HistoryEnabled)
+			}
+			if off := *cfg; func() bool { off.Locations.Enabled = false; return uiConfig(&off).HistoryEnabled }() {
+				t.Fatal("history_enabled true with locations disabled")
+			}
 			if ui.GeocodeEnabled != tt.usable || ui.Provider != tt.provider || !reflect.DeepEqual(ui.MapOrigins, tt.origins) {
 				t.Fatalf("ui = %+v", ui)
 			}

@@ -4,6 +4,8 @@ package main
 import (
 	"fmt"
 	"os"
+	// Embed the IANA zone database so time zone validation works on hosts without zoneinfo.
+	_ "time/tzdata"
 
 	"github.com/spf13/cobra"
 

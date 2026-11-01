@@ -501,6 +501,75 @@ paths:
         "429": { $ref: "#/components/responses/CommandRateLimited" }
         "503": { $ref: "#/components/responses/CommandError" }
         "504": { $ref: "#/components/responses/CommandOutcomeUnknown" }
+  /api/devices/{prefix}/{device}/history:
+    get:
+      summary: Location history of a device (admin)
+      description: >
+        Recorded location points of one device, ascending by time. Administrators only, including hidden devices
+        (administrators see them in the device list too); reads write no audit rows and are limited to 120 per
+        minute per user (429 `rate_limited`). Defaults to the last 24 hours; the range must satisfy from < to and span
+        at most 31 days. When more than `limit` points match they are downsampled evenly on the server (first and last
+        point always kept) and `truncated` is true. A range matching more than 200000 rows is thinned in SQL first.
+        Stored data is served even when `history_enabled` is false.
+      parameters:
+        - { name: prefix, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" } }
+        - { name: device, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" } }
+        - { name: from, in: query, schema: { type: string, format: date-time }, description: "RFC 3339; default `to` minus 24 h" }
+        - { name: to, in: query, schema: { type: string, format: date-time }, description: "RFC 3339; default now" }
+        - { name: limit, in: query, schema: { type: integer, minimum: 2, maximum: 20000, default: 5000 }, description: "Values above 20000 are clamped" }
+      responses:
+        "200":
+          description: The points.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LocationHistory" }
+        "400":
+          description: "`invalid`: bad time, from >= to, range over 31 days, bad limit."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommandError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: "`unknown_device`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommandError" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+  /api/devices/{prefix}/{device}/routes:
+    get:
+      summary: Daily routes of a device (admin)
+      description: >
+        Points grouped by local calendar day in `tz` (default UTC; DST days use each point's local date), ascending.
+        A day is split into segments where consecutive points are more than 30 minutes apart. Single-point segments
+        are counted in `point_count` but omitted from `segments`. Segments are simplified (Douglas-Peucker, 10 m,
+        endpoints kept); `distance_m` is the sum of great-circle distances over the unsimplified points inside segments,
+        never across gaps. Same access, range, rate limit and hidden-device rules as the history route.
+      parameters:
+        - { name: prefix, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" } }
+        - { name: device, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" } }
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+        - { name: tz, in: query, schema: { type: string, example: Asia/Jerusalem }, description: IANA time zone name, default UTC }
+      responses:
+        "200":
+          description: The routes.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeviceRoutes" }
+        "400":
+          description: "`invalid`: as for history, or an unknown `tz`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommandError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: "`unknown_device`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommandError" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
   /api/places:
     get:
       summary: List safe places
@@ -1118,7 +1187,7 @@ components:
         since: { type: string, format: date-time, nullable: true }
     UIConfig:
       type: object
-      required: [map, geocode_enabled]
+      required: [map, geocode_enabled, history_enabled]
       properties:
         map:
           type: object
@@ -1129,6 +1198,48 @@ components:
             style_dark: { type: string, format: uri, description: MapLibre style URL for the dark theme }
             attribution: { type: string, description: "Text to show on the map, e.g. `© OpenStreetMap contributors · OpenFreeMap`" }
         geocode_enabled: { type: boolean, description: "True when reverse geocoding is enabled and a valid server key is configured" }
+        history_enabled: { type: boolean, description: "True when the location history recorder is on (`locations.enabled`)" }
+    LocationHistory:
+      type: object
+      required: [points, truncated]
+      properties:
+        points:
+          type: array
+          items:
+            type: object
+            required: [t, lat, lon, accuracy]
+            properties:
+              t: { type: integer, format: int64, description: Fix time, unix seconds }
+              lat: { type: number }
+              lon: { type: number }
+              accuracy: { type: number, nullable: true, description: Metres }
+        truncated: { type: boolean, description: True when points were downsampled }
+    DeviceRoutes:
+      type: object
+      required: [days]
+      properties:
+        days:
+          type: array
+          items:
+            type: object
+            required: [date, distance_m, point_count, first, last, segments]
+            properties:
+              date: { type: string, example: "2026-10-25", description: Local calendar day in `tz` }
+              distance_m: { type: number }
+              point_count: { type: integer }
+              first: { type: integer, format: int64, description: Unix seconds of the first point }
+              last: { type: integer, format: int64, description: Unix seconds of the last point }
+              segments:
+                type: array
+                items:
+                  type: array
+                  description: Simplified polyline of at least two points
+                  items:
+                    type: array
+                    minItems: 3
+                    maxItems: 3
+                    items: { type: number }
+                    description: "[lat, lon, t(unix s)]"
     Device:
       type: object
       required: [key, prefix, device, full_name, color, hidden, online, last_seen, created_at]
