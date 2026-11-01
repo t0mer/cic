@@ -675,3 +675,62 @@ func TestLoginFailsWhenCapEnforcementFails(t *testing.T) {
 		t.Fatalf("sessions = %d (err %v), want the cap %d", n, err, MaxSessionsPerUser)
 	}
 }
+
+// Replacing a session is all-or-nothing: if retiring the old one fails, the browser keeps it.
+func TestFailedLoginKeepsTheSessionItCameWith(t *testing.T) {
+	s, _ := newSvc(t, false)
+	u := mustUser(t, s, "alice", RoleViewer, false)
+	ctx := context.Background()
+	tok, _, err := s.Store().CreateSession(ctx, u.ID, "blockme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := s.Store().db
+	if _, err := db.Exec(`CREATE TRIGGER no_retire BEFORE DELETE ON sessions WHEN OLD.user_agent = 'blockme'
+		BEGIN SELECT RAISE(ABORT, 'retire blocked'); END`); err != nil {
+		t.Fatal(err)
+	}
+	c := newClient(t, s)
+	c.cookie = &http.Cookie{Name: s.CookieName(), Value: tok}
+	rec := c.login("alice", goodPW)
+	if rec.Code != 500 || len(rec.Result().Cookies()) != 0 {
+		t.Fatalf("login %d cookies=%v", rec.Code, rec.Result().Cookies())
+	}
+	if rec := c.do("GET", "/api/auth/me", nil, nil); rec.Code != 200 {
+		t.Fatalf("the browser lost its session: /me %d", rec.Code)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE user_id = ?`, u.ID).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("sessions = %d (err %v), want 1", n, err)
+	}
+}
+
+// A second-factor login whose session cannot be issued writes no login audit event.
+func TestFailedBackupCodeLoginIsNotAudited(t *testing.T) {
+	f := setup2FA(t, RoleViewer)
+	db := f.s.Store().db
+	var uid int64
+	if err := db.QueryRow(`SELECT id FROM users WHERE username = 'alice'`).Scan(&uid); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < MaxSessionsPerUser; i++ {
+		if _, _, err := f.s.Store().CreateSession(context.Background(), uid, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`UPDATE sessions SET last_seen = 1, created_at = 1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER no_evict2 BEFORE DELETE ON sessions WHEN OLD.last_seen = 1
+		BEGIN SELECT RAISE(ABORT, 'evict blocked'); END`); err != nil {
+		t.Fatal(err)
+	}
+	c := newClient(t, f.s)
+	tok := f.step1(t, c)
+	if rec := c.step2(tok, f.codes[0]); rec.Code != 500 || len(rec.Result().Cookies()) != 0 {
+		t.Fatalf("step2 %d cookies=%v", rec.Code, rec.Result().Cookies())
+	}
+	if f.aud.has("alice|2fa_login|factor=backup_code") {
+		t.Fatal("a login that issued no session was audited as a login")
+	}
+}

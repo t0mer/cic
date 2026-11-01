@@ -449,8 +449,11 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 	// u was read before the (slow) password check, so two-factor may have been enabled in
 	// the meantime. The insert itself re-checks the flag; a lost race turns into a challenge,
 	// so the attempt is only settled afterwards (a challenge must not clear failure counters).
-	if !s.startSession(w, r, u, true, -1) {
+	switch s.startSession(w, r, u, true, -1) {
+	case sessionNeedsChallenge:
 		s.challenge(w, att, u)
+		return
+	case sessionFailed:
 		return
 	}
 	// Only the account's own counter is cleared: the source address keeps its failures, so
@@ -480,48 +483,44 @@ func (s *Service) challenge(w http.ResponseWriter, att *Attempt, u User) {
 	writeJSON(w, http.StatusOK, map[string]any{"mfa_required": true, "mfa_token": token})
 }
 
-// startSession creates a fresh session, retires the session the request came in with,
-// records the login and answers with the session view. With only2FAOff it creates the
-// session only while the account still has no second factor and reports false, having
-// written nothing and left the old session alone, when two-factor was enabled in the
-// meantime.
-func (s *Service) startSession(w http.ResponseWriter, r *http.Request, u User, only2FAOff bool, gen int64) bool {
-	token, sess, err := s.store.insertSession(r.Context(), u.ID, r.UserAgent(), only2FAOff, gen)
+// sessionResult tells callers of startSession what happened to the request.
+type sessionResult int
+
+const (
+	sessionIssued         sessionResult = iota // a session was created and the answer written
+	sessionNeedsChallenge                      // two-factor was enabled meanwhile; nothing written, nothing changed
+	sessionFailed                              // an error answer was written, nothing changed
+)
+
+// startSession atomically creates a fresh session and retires the request's old one (see
+// Store.issueSession), records the login and answers with the session view. With only2FAOff
+// it creates the session only while the account still has no second factor and reports
+// sessionNeedsChallenge, having written nothing and left every session alone, when
+// two-factor was enabled in the meantime.
+func (s *Service) startSession(w http.ResponseWriter, r *http.Request, u User, only2FAOff bool, gen int64) sessionResult {
+	var old string
+	if c, err := r.Cookie(s.CookieName()); err == nil {
+		old = c.Value // never reuse a pre-login session
+	}
+	token, sess, err := s.store.issueSession(r.Context(), u.ID, r.UserAgent(), only2FAOff, gen, old)
 	if errors.Is(err, ErrSecondFactorRequired) {
-		return false
+		return sessionNeedsChallenge
 	}
 	if errors.Is(err, errAuthChanged) {
 		writeError(w, http.StatusUnauthorized, "login expired, sign in again")
-		return true
+		return sessionFailed
 	}
 	if err != nil {
 		s.log.Error("creating session", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
-		return true
-	}
-	// Only now that the replacement exists is the old session retired (never reused), and
-	// only then is the per-user cap enforced, so the retired session does not count.
-	if c, err := r.Cookie(s.CookieName()); err == nil {
-		if err := s.store.DeleteSession(r.Context(), c.Value); err != nil {
-			s.log.Warn("retiring previous session", "err", err)
-		}
-	}
-	if err := s.store.evictOverCap(r.Context(), u.ID); err != nil {
-		// The cap is a security limit: do not hand out a session that leaves the account
-		// over it. Take the new one back (best effort) and fail the login.
-		s.log.Error("enforcing session cap", "err", err)
-		if derr := s.store.DeleteSession(context.WithoutCancel(r.Context()), token); derr != nil {
-			s.log.Error("removing session after failed cap enforcement", "err", derr)
-		}
-		writeError(w, http.StatusInternalServerError, "internal error")
-		return true
+		return sessionFailed
 	}
 	if err := s.store.TouchLogin(r.Context(), u.ID); err != nil {
 		s.log.Warn("recording login time", "err", err)
 	}
 	s.setCookie(w, token)
 	writeJSON(w, http.StatusOK, sessionView{User: viewOf(u), CSRFToken: sess.CSRFToken})
-	return true
+	return sessionIssued
 }
 
 func (s *Service) logout(w http.ResponseWriter, r *http.Request) {

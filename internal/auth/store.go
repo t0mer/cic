@@ -356,26 +356,17 @@ func trimUA(ua string) string {
 
 // CreateSession starts a session and returns its secret token (shown only once).
 func (s *Store) CreateSession(ctx context.Context, userID int64, userAgent string) (token string, sess Session, err error) {
-	return s.createSession(ctx, userID, userAgent, false, -1)
+	return s.issueSession(ctx, userID, userAgent, false, -1, "")
 }
 
-// createSession is CreateSession; with only2FAOff it inserts only while the user has no
-// second factor and returns ErrSecondFactorRequired otherwise. A gen >= 0 additionally
-// requires users.auth_gen to still equal gen (errAuthChanged otherwise).
-func (s *Store) createSession(ctx context.Context, userID int64, userAgent string, only2FAOff bool, gen int64) (token string, sess Session, err error) {
-	if token, sess, err = s.insertSession(ctx, userID, userAgent, only2FAOff, gen); err != nil {
-		return "", Session{}, err
-	}
-	if err := s.evictOverCap(ctx, userID); err != nil {
-		return "", Session{}, err
-	}
-	return token, sess, nil
-}
-
-// insertSession is createSession without the per-user cap: callers that retire another
-// session right afterwards evict only once that is done, so the cap does not cost a
-// second device its session.
-func (s *Store) insertSession(ctx context.Context, userID int64, userAgent string, only2FAOff bool, gen int64) (token string, sess Session, err error) {
+// issueSession atomically creates a session, retires the session identified by oldToken (if
+// any) and enforces the per-user cap, in one transaction: either all of it happens or none
+// of it does, so a failure never leaves a browser without its previous session nor an
+// account over the cap. With only2FAOff it inserts only while the user has no second factor
+// (ErrSecondFactorRequired otherwise); a gen >= 0 additionally requires users.auth_gen to
+// still equal gen (errAuthChanged otherwise). Streams of the sessions removed are ended
+// after the commit.
+func (s *Store) issueSession(ctx context.Context, userID int64, userAgent string, only2FAOff bool, gen int64, oldToken string) (token string, sess Session, err error) {
 	if token, err = randToken(32); err != nil {
 		return "", Session{}, err
 	}
@@ -389,10 +380,15 @@ func (s *Store) insertSession(ctx context.Context, userID int64, userAgent strin
 	if s.afterLoginRead != nil {
 		s.afterLoginRead()
 	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", Session{}, fmt.Errorf("starting session transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
 	// A single statement decides on the live two-factor flag, so a login that read the user
 	// before two-factor was enabled cannot slip a password-only session in afterwards (the
 	// enable flow sets the flag first and only then revokes the other sessions).
-	res, err := s.db.ExecContext(ctx, `INSERT INTO sessions(id_hash, user_id, csrf_token, created_at, last_seen, user_agent)
+	res, err := tx.ExecContext(ctx, `INSERT INTO sessions(id_hash, user_id, csrf_token, created_at, last_seen, user_agent)
 		SELECT ?, ?, ?, ?, ?, ? WHERE (? = 0 OR EXISTS (SELECT 1 FROM users WHERE id = ? AND totp_enabled = 0))
 		AND (? < 0 OR EXISTS (SELECT 1 FROM users WHERE id = ? AND auth_gen = ?))`,
 		sess.IDHash, userID, csrf, now, now, sess.UserAgent, only2FAOff, userID, gen, userID, gen)
@@ -405,37 +401,60 @@ func (s *Store) insertSession(ctx context.Context, userID int64, userAgent strin
 		}
 		return "", Session{}, ErrSecondFactorRequired
 	}
+	var ended []string
+	if oldToken != "" && len(oldToken) <= 128 {
+		oldHash := hashToken(oldToken)
+		if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE id_hash = ?`, oldHash); err != nil {
+			return "", Session{}, fmt.Errorf("retiring previous session: %w", err)
+		}
+		ended = append(ended, oldHash)
+	}
+	evicted, err := evictOverCap(ctx, tx, userID)
+	if err != nil {
+		return "", Session{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", Session{}, fmt.Errorf("committing session: %w", err)
+	}
+	for _, h := range append(ended, evicted...) {
+		s.endWatchers(0, h)
+	}
 	return token, sess, nil
 }
 
-// evictOverCap deletes the user's least recently used sessions beyond MaxSessionsPerUser.
-func (s *Store) evictOverCap(ctx context.Context, userID int64) error {
-	rows, err := s.db.QueryContext(ctx, `SELECT id_hash FROM sessions WHERE user_id = ?
+type queryExecer interface {
+	execer
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+// evictOverCap deletes the user's least recently used sessions beyond MaxSessionsPerUser
+// and returns their hashes; the caller ends their streams once the deletion is final.
+func evictOverCap(ctx context.Context, x queryExecer, userID int64) ([]string, error) {
+	rows, err := x.QueryContext(ctx, `SELECT id_hash FROM sessions WHERE user_id = ?
 		ORDER BY last_seen DESC, created_at DESC, rowid DESC LIMIT -1 OFFSET ?`, userID, MaxSessionsPerUser)
 	if err != nil {
-		return fmt.Errorf("listing sessions: %w", err)
+		return nil, fmt.Errorf("listing sessions: %w", err)
 	}
 	var drop []string
 	for rows.Next() {
 		var h string
 		if err := rows.Scan(&h); err != nil {
 			rows.Close()
-			return err
+			return nil, err
 		}
 		drop = append(drop, h)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return err
+		return nil, err
 	}
 	rows.Close()
 	for _, h := range drop {
-		if _, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE id_hash = ?`, h); err != nil {
-			return fmt.Errorf("evicting session: %w", err)
+		if _, err := x.ExecContext(ctx, `DELETE FROM sessions WHERE id_hash = ?`, h); err != nil {
+			return nil, fmt.Errorf("evicting session: %w", err)
 		}
-		s.endWatchers(userID, h)
 	}
-	return nil
+	return drop, nil
 }
 
 // Lookup resolves a session token to its session and user, enforcing idle and absolute
