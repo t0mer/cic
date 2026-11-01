@@ -87,6 +87,12 @@ auth:
     allowed_emails: []                      # CIC_AUTH_OIDC_ALLOWED_EMAILS
 audit:
   retention: 2160h         # CIC_AUDIT_RETENTION
+locations:
+  enabled: true            # CIC_LOCATIONS_ENABLED: record location history
+  retention: 2160h         # CIC_LOCATIONS_RETENTION (<= 0 means the default)
+  min_distance_m: 25       # CIC_LOCATIONS_MIN_DISTANCE_M: skip fixes closer than this to the last stored point...
+  min_interval: 5m         # CIC_LOCATIONS_MIN_INTERVAL: ...unless at least this much time has passed
+  max_points_per_device: 200000  # CIC_LOCATIONS_MAX_POINTS_PER_DEVICE: oldest points beyond this are deleted (0 = no cap)
 log:
   level: "info"            # CIC_LOG_LEVEL: debug | info | warn (or warning) | error
   format: "text"           # CIC_LOG_FORMAT: text | json

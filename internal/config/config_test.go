@@ -308,3 +308,44 @@ func TestNonPositiveAuditRetentionMeansDefault(t *testing.T) {
 		}
 	}
 }
+
+func TestLocationsDefaultsAndValidation(t *testing.T) {
+	c, err := Load("", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := c.Locations
+	if !l.Enabled || l.Retention != 2160*time.Hour || l.MinDistanceM != 25 || l.MinInterval != 5*time.Minute || l.MaxPointsPerDevice != 200000 {
+		t.Fatalf("unexpected defaults: %+v", l)
+	}
+	for _, d := range []time.Duration{0, -time.Hour} {
+		c.Locations.Retention = d
+		if err := c.Validate(); err != nil || c.Locations.Retention != 2160*time.Hour {
+			t.Errorf("retention %v -> %v, %v", d, c.Locations.Retention, err)
+		}
+	}
+	for name, mut := range map[string]func(*Config){
+		"min_distance_m":        func(c *Config) { c.Locations.MinDistanceM = -1 },
+		"min_interval":          func(c *Config) { c.Locations.MinInterval = -time.Second },
+		"max_points_per_device": func(c *Config) { c.Locations.MaxPointsPerDevice = -1 },
+	} {
+		c, _ := Load("", nil)
+		mut(c)
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), name) {
+			t.Errorf("%s: negative accepted: %v", name, err)
+		}
+	}
+}
+
+func TestLocationsEnv(t *testing.T) {
+	t.Setenv("CIC_LOCATIONS_ENABLED", "false")
+	t.Setenv("CIC_LOCATIONS_MIN_DISTANCE_M", "40")
+	t.Setenv("CIC_LOCATIONS_MIN_INTERVAL", "90s")
+	c, err := Load("", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Locations.Enabled || c.Locations.MinDistanceM != 40 || c.Locations.MinInterval != 90*time.Second {
+		t.Fatalf("env not applied: %+v", c.Locations)
+	}
+}
