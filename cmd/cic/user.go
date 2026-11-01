@@ -16,6 +16,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/t0mer/cic/internal/auth"
+	"github.com/t0mer/cic/internal/config"
 	"github.com/t0mer/cic/internal/store"
 )
 
@@ -81,7 +82,7 @@ func newUserCmd() *cobra.Command {
 
 func newUserCmdWith(d userDeps) *cobra.Command {
 	user := &cobra.Command{Use: "user", Short: "Manage local users"}
-	user.PersistentFlags().String("db-path", "/data/cic.db", "SQLite database path (env CIC_STORAGE_PATH)")
+	user.PersistentFlags().String("db-path", config.DefaultStoragePath(), "SQLite database path (env CIC_STORAGE_PATH)")
 
 	// with opens the database and hands the user store to fn.
 	with := func(fn func(cmd *cobra.Command, st *auth.Store, args []string) error) func(*cobra.Command, []string) error {

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -347,5 +348,26 @@ func TestLocationsEnv(t *testing.T) {
 	}
 	if c.Locations.Enabled || c.Locations.MinDistanceM != 40 || c.Locations.MinInterval != 90*time.Second {
 		t.Fatalf("env not applied: %+v", c.Locations)
+	}
+}
+
+func TestDefaultStoragePath(t *testing.T) {
+	for goos, want := range map[string]string{"linux": "/data/cic.db", "darwin": "/data/cic.db", "windows": "cic.db"} {
+		if got := defaultStoragePath(goos); got != want {
+			t.Errorf("defaultStoragePath(%q) = %q, want %q", goos, got, want)
+		}
+	}
+	if got := DefaultStoragePath(); got != defaultStoragePath(runtime.GOOS) {
+		t.Errorf("DefaultStoragePath() = %q", got)
+	}
+}
+
+func TestStoragePathDefaultComesFromTheHelper(t *testing.T) {
+	cfg, err := Load("", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Storage.Path != DefaultStoragePath() {
+		t.Fatalf("storage.path default = %q, want %q", cfg.Storage.Path, DefaultStoragePath())
 	}
 }

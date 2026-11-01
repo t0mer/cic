@@ -50,7 +50,7 @@ func newServeCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().String("listen", ":8080", "HTTP listen address (env CIC_SERVER_LISTEN)")
-	cmd.Flags().String("db-path", "/data/cic.db", "SQLite database path (env CIC_STORAGE_PATH)")
+	cmd.Flags().String("db-path", config.DefaultStoragePath(), "SQLite database path (env CIC_STORAGE_PATH)")
 	cmd.Flags().Bool("insecure-cookies", false, "do not set the Secure attribute on the session cookie; plain-HTTP development only (env CIC_SERVER_INSECURE_COOKIES)")
 	return cmd
 }

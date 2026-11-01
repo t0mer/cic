@@ -157,12 +157,26 @@ Back up the whole `/data` volume: it contains `cic.db` and `secret.key` (see [Se
 
 ### Release binaries
 
-Each GitHub release attaches static binaries named `cic_<version>_<os>_<arch>` for Linux only: `amd64`, `arm64` and `armv7`. There are no macOS or Windows builds; build from source on those systems.
+Each GitHub release attaches static binaries named `cic_<version>_<os>_<arch>` for Linux (`amd64`, `arm64`, `armv7`) and Windows (`amd64`, `arm64`; the file name ends in `.exe`). There are no macOS builds; build from source there. For Windows see [Windows](#windows).
 
 ```bash
 chmod +x cic_<version>_linux_amd64
 ./cic_<version>_linux_amd64 serve --db-path ./cic.db --insecure-cookies   # plain-HTTP local trial only
 ```
+
+### Windows
+
+Download `cic_<version>_windows_amd64.exe` (or `_arm64.exe`) from the GitHub release and run it from a terminal:
+
+```powershell
+.\cic_<version>_windows_amd64.exe serve --listen 127.0.0.1:8080 --insecure-cookies   # plain-HTTP local trial only
+```
+
+- The database defaults to `cic.db` in the working directory (the Docker default `/data/cic.db` does not apply). Override it with `--db-path` or `CIC_STORAGE_PATH` (an absolute path such as `C:\ProgramData\cic\cic.db` is passed to SQLite as a plain file name; this path form is covered by a unit test but has not been run on Windows). If you copy `config.example.yaml`, remove or change its `storage.path: "/data/cic.db"` line: a YAML value beats the Windows default.
+- A `.env` file in the working directory is read, like on other systems.
+- There is no built-in Windows service. Run it in a terminal, with Task Scheduler, or with a wrapper such as NSSM (not provided or tested here).
+- `secret.key` is created next to the database. File-permission hardening (mode `0600` and the group/other warning) is not applied on Windows, so keep that folder private.
+- The Windows binaries are cross-compiled on Linux and are not exercised by CI tests yet.
 
 ### Build from source
 
@@ -172,7 +186,7 @@ git clone https://github.com/t0mer/cic.git && cd cic
 go build -o cic ./cmd/cic
 ```
 
-`scripts/build.sh` cross-compiles the three Linux targets into `dist/` (`VERSION=2026.11.0 scripts/build.sh`); it does not build the web UI, so run the `npm` step first. Without the UI build the Go code still compiles, but the binary serves an empty UI.
+`scripts/build.sh` cross-compiles the five release targets (`linux/amd64`, `linux/arm64`, `linux/armv7`, `windows/amd64`, `windows/arm64`) into `dist/` (`VERSION=2026.11.0 scripts/build.sh`); it does not build the web UI, so run the `npm` step first. Without the UI build the Go code still compiles, but the binary serves an empty UI.
 
 ## Configuration
 
@@ -191,7 +205,7 @@ Precedence, highest first: **command-line flags > environment variables > YAML f
 | `server.base_url` | `CIC_SERVER_BASE_URL` | | empty | Public URL. An `https://` value enables HSTS and makes the Origin check expect https. |
 | `server.insecure_cookies` | `CIC_SERVER_INSECURE_COOKIES` | `--insecure-cookies` | `false` | Drops the `Secure` flag and the `__Host-` cookie prefix. Plain-HTTP development only. |
 | `server.trusted_proxies` | `CIC_SERVER_TRUSTED_PROXIES` | | empty | IPs or CIDRs whose `X-Forwarded-For` / `X-Forwarded-Proto` are trusted. |
-| `storage.path` | `CIC_STORAGE_PATH` | `--db-path` | `/data/cic.db` | SQLite database file. |
+| `storage.path` | `CIC_STORAGE_PATH` | `--db-path` | `/data/cic.db` (`cic.db` on Windows) | SQLite database file. |
 | `mqtt.prefixes` | `CIC_MQTT_PREFIXES` | | `dradis` | Topic prefixes to subscribe to; each matches `[A-Za-z0-9_-]{1,64}`. |
 | `mqtt.broker.host` | `CIC_MQTT_BROKER_HOST` | | empty | Broker host. Empty disables MQTT. |
 | `mqtt.broker.port` | `CIC_MQTT_BROKER_PORT` | | `1883` | Broker port. |
@@ -251,7 +265,7 @@ TOTP secrets are encrypted at rest with AES-256-GCM. The key comes from, in orde
 | `cic user disable <name>` / `enable <name>` | Disable (also ends sessions) or re-enable a user. |
 | `cic user disable-2fa <name>` | Turn off 2FA, delete backup codes and end all sessions. |
 
-The `user` commands open the SQLite file directly (`--db-path`, default `/data/cic.db`), so they work while the server is running. In Docker: `docker exec -it cic /cic user list`. User names match `[A-Za-z0-9._-]{3,64}`; passwords need at least 12 characters.
+The `user` commands open the SQLite file directly (`--db-path`, default `/data/cic.db`, or `cic.db` on Windows), so they work while the server is running. In Docker: `docker exec -it cic /cic user list`. User names match `[A-Za-z0-9._-]{3,64}`; passwords need at least 12 characters.
 
 ## MQTT contract
 
@@ -425,7 +439,7 @@ Layout:
 | `internal/webui`, `web/` | Embedded UI and its React + TypeScript + Vite + Tailwind source |
 | `scripts/` | `build.sh`, `next-version.sh` |
 
-Releases use the date-based version `YYYY.M.PATCH` (for example `2026.11.0`; no leading zero in the month), computed by `scripts/next-version.sh` from git tags. The `Release` workflow builds the Linux binaries and creates the tag and GitHub release; the `Docker` workflow publishes `techblog/cic:latest` and `techblog/cic:<version>`.
+Releases use the date-based version `YYYY.M.PATCH` (for example `2026.11.0`; no leading zero in the month), computed by `scripts/next-version.sh` from git tags. The `Release` workflow builds the Linux and Windows binaries and creates the tag and GitHub release; the `Docker` workflow publishes `techblog/cic:latest` and `techblog/cic:<version>`.
 
 ## Contributing
 

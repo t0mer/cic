@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -147,6 +148,19 @@ var flagKeys = map[string]string{
 
 var prefixRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
+// DefaultStoragePath returns the default SQLite path for the running OS.
+func DefaultStoragePath() string { return defaultStoragePath(runtime.GOOS) }
+
+// defaultStoragePath is "/data/cic.db" (the Docker volume) except on Windows, where
+// "/data" would resolve against the current drive root and "cic.db" in the working
+// directory is used instead.
+func defaultStoragePath(goos string) string {
+	if goos == "windows" {
+		return "cic.db"
+	}
+	return "/data/cic.db"
+}
+
 func newViper() *viper.Viper {
 	v := viper.New()
 	v.SetEnvPrefix("CIC")
@@ -157,7 +171,7 @@ func newViper() *viper.Viper {
 		"server.base_url":                  "",
 		"server.insecure_cookies":          false,
 		"server.trusted_proxies":           []string{},
-		"storage.path":                     "/data/cic.db",
+		"storage.path":                     DefaultStoragePath(),
 		"mqtt.prefixes":                    []string{"dradis"},
 		"mqtt.broker.host":                 "",
 		"mqtt.broker.port":                 1883,

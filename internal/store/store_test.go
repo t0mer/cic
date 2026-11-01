@@ -186,3 +186,18 @@ func TestMigrateConcurrentStartsStress(t *testing.T) {
 		}
 	}
 }
+
+func TestDSNFor(t *testing.T) {
+	const q = "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)"
+	cases := []struct{ goos, path, want string }{
+		{"linux", "/data/cic.db", "file:/data/cic.db" + q},
+		{"linux", "/data/a b?c#d%e.db", "file:/data/a b%3Fc%23d%25e.db" + q},
+		{"windows", `C:\ProgramData\cic\cic.db`, `C:\ProgramData\cic\cic.db` + q},
+		{"windows", "cic.db", "cic.db" + q},
+	}
+	for _, c := range cases {
+		if got := dsnFor(c.goos, c.path); got != c.want {
+			t.Errorf("dsnFor(%q, %q) = %q, want %q", c.goos, c.path, got, c.want)
+		}
+	}
+}

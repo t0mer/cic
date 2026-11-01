@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -130,6 +131,12 @@ func readKeyFileWait(path string, log *slog.Logger) ([]byte, error) {
 	}
 }
 
+// modeWarns reports whether perm should trigger the group/other access warning. Windows
+// does not expose POSIX permission bits (files always report 0666), so it never warns there.
+func modeWarns(goos string, perm fs.FileMode) bool {
+	return goos != "windows" && perm&0o077 != 0
+}
+
 var (
 	errEmptyKey = errors.New("empty")
 	errShortKey = errors.New("too short")
@@ -143,7 +150,7 @@ func readKeyFile(path string, log *slog.Logger) ([]byte, error) {
 	if len(strings.TrimSpace(string(b))) == 0 {
 		return nil, fmt.Errorf("key file %s is empty (made by hand or a failed copy); restore it from backup, or delete it to generate a new key (only if no two-factor secrets exist): %w", path, errEmptyKey)
 	}
-	if fi, err := os.Stat(path); err == nil && fi.Mode().Perm()&0o077 != 0 && log != nil {
+	if fi, err := os.Stat(path); err == nil && modeWarns(runtime.GOOS, fi.Mode().Perm()) && log != nil {
 		log.Warn("secret key file is accessible by group/other; restrict it to mode 0600", "path", path)
 	}
 	s := strings.TrimSpace(string(b))
