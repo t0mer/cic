@@ -480,15 +480,13 @@ func (s *Service) challenge(w http.ResponseWriter, att *Attempt, u User) {
 	writeJSON(w, http.StatusOK, map[string]any{"mfa_required": true, "mfa_token": token})
 }
 
-// startSession replaces any pre-login session with a fresh one, records the login and
-// answers with the session view. With only2FAOff it creates the session only while the
-// account still has no second factor and reports false, having written nothing, when
-// two-factor was enabled in the meantime.
+// startSession creates a fresh session, retires the session the request came in with,
+// records the login and answers with the session view. With only2FAOff it creates the
+// session only while the account still has no second factor and reports false, having
+// written nothing and left the old session alone, when two-factor was enabled in the
+// meantime.
 func (s *Service) startSession(w http.ResponseWriter, r *http.Request, u User, only2FAOff bool, gen int64) bool {
-	if c, err := r.Cookie(s.CookieName()); err == nil {
-		_ = s.store.DeleteSession(r.Context(), c.Value) // never reuse a pre-login session
-	}
-	token, sess, err := s.store.createSession(r.Context(), u.ID, r.UserAgent(), only2FAOff, gen)
+	token, sess, err := s.store.insertSession(r.Context(), u.ID, r.UserAgent(), only2FAOff, gen)
 	if errors.Is(err, ErrSecondFactorRequired) {
 		return false
 	}
@@ -500,6 +498,16 @@ func (s *Service) startSession(w http.ResponseWriter, r *http.Request, u User, o
 		s.log.Error("creating session", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return true
+	}
+	// Only now that the replacement exists is the old session retired (never reused), and
+	// only then is the per-user cap enforced, so the retired session does not count.
+	if c, err := r.Cookie(s.CookieName()); err == nil {
+		if err := s.store.DeleteSession(r.Context(), c.Value); err != nil {
+			s.log.Warn("retiring previous session", "err", err)
+		}
+	}
+	if err := s.store.evictOverCap(r.Context(), u.ID); err != nil {
+		s.log.Warn("enforcing session cap", "err", err)
 	}
 	if err := s.store.TouchLogin(r.Context(), u.ID); err != nil {
 		s.log.Warn("recording login time", "err", err)

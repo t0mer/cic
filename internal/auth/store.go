@@ -363,6 +363,19 @@ func (s *Store) CreateSession(ctx context.Context, userID int64, userAgent strin
 // second factor and returns ErrSecondFactorRequired otherwise. A gen >= 0 additionally
 // requires users.auth_gen to still equal gen (errAuthChanged otherwise).
 func (s *Store) createSession(ctx context.Context, userID int64, userAgent string, only2FAOff bool, gen int64) (token string, sess Session, err error) {
+	if token, sess, err = s.insertSession(ctx, userID, userAgent, only2FAOff, gen); err != nil {
+		return "", Session{}, err
+	}
+	if err := s.evictOverCap(ctx, userID); err != nil {
+		return "", Session{}, err
+	}
+	return token, sess, nil
+}
+
+// insertSession is createSession without the per-user cap: callers that retire another
+// session right afterwards evict only once that is done, so the cap does not cost a
+// second device its session.
+func (s *Store) insertSession(ctx context.Context, userID int64, userAgent string, only2FAOff bool, gen int64) (token string, sess Session, err error) {
 	if token, err = randToken(32); err != nil {
 		return "", Session{}, err
 	}
@@ -391,9 +404,6 @@ func (s *Store) createSession(ctx context.Context, userID int64, userAgent strin
 			return "", Session{}, errAuthChanged
 		}
 		return "", Session{}, ErrSecondFactorRequired
-	}
-	if err := s.evictOverCap(ctx, userID); err != nil {
-		return "", Session{}, err
 	}
 	return token, sess, nil
 }

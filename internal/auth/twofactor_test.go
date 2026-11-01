@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -565,5 +566,81 @@ func TestLoginRaceFallbackKeepsFailureCount(t *testing.T) {
 	}
 	if rec := c.login("alice", goodPW); rec.Code != 429 {
 		t.Fatalf("failure counter was cleared: got %d", rec.Code)
+	}
+}
+
+// A login that loses the race to two-factor enablement only gets a challenge; the session it
+// came in with (which the enable flow may have retained) must survive.
+func TestLoginRaceFallbackKeepsExistingSession(t *testing.T) {
+	s, clk := newSvc(t, false)
+	withKey(t, s)
+	u := mustUser(t, s, "alice", RoleViewer, false)
+	c := newClient(t, s)
+	if rec := c.login("alice", goodPW); rec.Code != 200 {
+		t.Fatalf("first login %d", rec.Code)
+	}
+	old := c.cookie
+	fired := false
+	s.Store().afterLoginRead = func() {
+		if !fired {
+			fired = true
+			enableTOTP(t, s.Store(), u, clk.Now()) // enabled, this session retained
+		}
+	}
+	rec := c.do("POST", "/api/auth/login", map[string]string{"username": "alice", "password": goodPW}, nil)
+	if !strings.Contains(rec.Body.String(), "mfa_required") {
+		t.Fatalf("want challenge, got %d %s", rec.Code, rec.Body)
+	}
+	if c.cookie != old {
+		t.Fatal("test client lost its cookie")
+	}
+	if rec := c.do("GET", "/api/auth/me", nil, nil); rec.Code != 200 {
+		t.Fatalf("existing session was destroyed: /me %d", rec.Code)
+	}
+}
+
+// A successful login still retires the session it came in with.
+func TestLoginRetiresPreviousSession(t *testing.T) {
+	s, _ := newSvc(t, false)
+	mustUser(t, s, "alice", RoleViewer, false)
+	c := newClient(t, s)
+	c.login("alice", goodPW)
+	old := c.cookie
+	if rec := c.login("alice", goodPW); rec.Code != 200 {
+		t.Fatalf("second login %d", rec.Code)
+	}
+	if c.cookie == nil || c.cookie.Value == old.Value {
+		t.Fatal("session cookie was not replaced")
+	}
+	stale := newClient(t, s)
+	stale.cookie = old
+	if rec := stale.do("GET", "/api/auth/me", nil, nil); rec.Code != 401 {
+		t.Fatalf("old session still valid: %d", rec.Code)
+	}
+}
+
+// Logging in at the session cap while carrying a session that is about to be retired must
+// not cost another device its session.
+func TestLoginAtCapRetiresOnlyThePreviousSession(t *testing.T) {
+	s, _ := newSvc(t, false)
+	u := mustUser(t, s, "alice", RoleViewer, false)
+	ctx := context.Background()
+	var toks []string
+	for i := 0; i < MaxSessionsPerUser; i++ {
+		tok, _, err := s.Store().CreateSession(ctx, u.ID, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		toks = append(toks, tok)
+	}
+	c := newClient(t, s)
+	c.cookie = &http.Cookie{Name: s.CookieName(), Value: toks[len(toks)-1]} // the most recent one
+	if rec := c.login("alice", goodPW); rec.Code != 200 {
+		t.Fatalf("login %d", rec.Code)
+	}
+	for i, tok := range toks[:len(toks)-1] {
+		if _, _, err := s.Store().Check(ctx, tok); err != nil {
+			t.Fatalf("session %d of another device was lost: %v", i, err)
+		}
 	}
 }
