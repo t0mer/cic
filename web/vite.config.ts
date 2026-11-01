@@ -12,6 +12,12 @@ export default defineConfig({
     outDir: '../internal/webui/dist',
     emptyOutDir: false,
     assetsDir: 'assets',
+    rolldownOptions: {
+      output: {
+        // maplibre-gl is only reachable through the lazy Map route: give it its own async chunk.
+        codeSplitting: { groups: [{ name: 'maplibre', test: /node_modules[\\/]maplibre-gl/ }] },
+      },
+    },
   },
   server: {
     port: 5173,
