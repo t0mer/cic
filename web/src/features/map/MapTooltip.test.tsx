@@ -14,12 +14,19 @@ const NOW = 1_000_060
 function auth(role: Role): AuthValue {
   return {
     status: 'authenticated',
-    user: { username: 'u', role, must_change_password: false, csrf_token: 't' },
+    user: {
+      username: 'u',
+      role,
+      must_change_password: false,
+      totp_enabled: false,
+      csrf_token: 't',
+    },
     isAdmin: role === 'admin',
     mustChangePassword: false,
     error: null,
     retry: () => {},
     login: () => Promise.resolve(),
+    verifyMfa: () => Promise.resolve(),
     logout: () => Promise.resolve(),
     changePassword: () => Promise.resolve(),
   }

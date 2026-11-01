@@ -11,12 +11,15 @@ import { RevealProvider } from './reveal'
 export function auth(role: Role | null, username = 'tomer'): AuthValue {
   return {
     status: role ? 'authenticated' : 'anonymous',
-    user: role ? { username, role, must_change_password: false, csrf_token: 't' } : null,
+    user: role
+      ? { username, role, must_change_password: false, totp_enabled: false, csrf_token: 't' }
+      : null,
     isAdmin: role === 'admin',
     mustChangePassword: false,
     error: null,
     retry: () => {},
     login: () => Promise.resolve(),
+    verifyMfa: () => Promise.resolve(),
     logout: () => Promise.resolve(),
     changePassword: () => Promise.resolve(),
   }

@@ -34,14 +34,21 @@ paths:
             schema: { $ref: "#/components/schemas/LoginRequest" }
       responses:
         "200":
-          description: Logged in.
+          description: >
+            Logged in (session cookie set), or, for a user with two-factor login on and a correct
+            password, `mfa_required` with a short-lived `mfa_token` and NO cookie: finish with
+            `POST /api/auth/login/2fa`. A correct password in the two-factor case does not clear the
+            account's failure counter; that happens only when the second factor passes.
           headers:
             Set-Cookie:
-              description: "`__Host-cic_session=<opaque>; Path=/; HttpOnly; Secure; SameSite=Strict` (with --insecure-cookies: `cic_session=<opaque>; Path=/; HttpOnly; SameSite=Strict`)."
+              description: "Only on a completed login. `__Host-cic_session=<opaque>; Path=/; HttpOnly; Secure; SameSite=Strict` (with --insecure-cookies: `cic_session=<opaque>; Path=/; HttpOnly; SameSite=Strict`)."
               schema: { type: string }
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/LoginResponse" }
+              schema:
+                oneOf:
+                  - { $ref: "#/components/schemas/LoginResponse" }
+                  - { $ref: "#/components/schemas/MfaRequired" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -51,6 +58,147 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+  /api/auth/login/2fa:
+    post:
+      summary: Finish a two-factor login
+      description: >
+        Second step after `POST /api/auth/login` returned `mfa_required`. `code` is the current 6-digit
+        authenticator code or an unused backup code (consumed on use; each authenticator time step works
+        once). The `mfa_token` lives 5 minutes, is single use and dies after 5 wrong codes. A wrong code
+        counts against the same per-username and per-address limits as a wrong password (429 when locked).
+        An unknown, expired or exhausted token answers `401 {"error":"login expired, sign in again"}`; a wrong
+        code `401 {"error":"invalid code"}`. Same-origin check applies; no CSRF token is needed.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Login2FARequest" }
+      responses:
+        "200":
+          description: Logged in; same body and cookie as a plain login.
+          headers:
+            Set-Cookie:
+              description: The new session cookie.
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LoginResponse" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503":
+          description: Secret key missing or server busy; nothing was counted against the account.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /api/auth/2fa:
+    get:
+      summary: Two-factor status of the current user
+      description: Any signed-in user manages only their own two-factor login.
+      responses:
+        "200":
+          description: Status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TwoFactorStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /api/auth/2fa/setup:
+    post:
+      summary: Start two-factor setup
+      description: >
+        Verifies `current_password`, generates a new secret and stores it pending (not active until
+        `/2fa/enable`; calling again replaces it). Rate limited on its own key (`2fa:<user>`). `409` when
+        two-factor login is already on; `503` when the server has no secret key (CIC_SECRET_KEY or
+        secret.key). The response is `no-store`.
+      parameters:
+        - { $ref: "#/components/parameters/CSRF" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PasswordRequest" }
+      responses:
+        "200":
+          description: Secret and provisioning URI (issuer `CIC`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TwoFactorSetup" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/Error" }
+  /api/auth/2fa/enable:
+    post:
+      summary: Turn two-factor login on
+      description: >
+        Verifies the first code against the pending secret, enables two-factor login and returns ten
+        backup codes, shown once. Ends the user's other sessions. `401 invalid code`, `409` when
+        nothing is pending or it is already on, `503` without a secret key. The response is `no-store`.
+      parameters:
+        - { $ref: "#/components/parameters/CSRF" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CodeRequest" }
+      responses:
+        "200":
+          description: Enabled.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BackupCodes" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/Error" }
+  /api/auth/2fa/disable:
+    post:
+      summary: Turn two-factor login off
+      description: >
+        Needs the current password AND a current code or unused backup code. Deletes the secret and all
+        backup codes and ends the user's other sessions. `409` when it is not on.
+      parameters:
+        - { $ref: "#/components/parameters/CSRF" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PasswordCodeRequest" }
+      responses:
+        "204": { description: Disabled. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/Error" }
+  /api/auth/2fa/backup-codes:
+    post:
+      summary: Regenerate backup codes
+      description: >
+        Needs the current password AND a current code or unused backup code. Replaces all backup codes
+        (the old ones stop working) and returns the new ten once. The response is `no-store`.
+      parameters:
+        - { $ref: "#/components/parameters/CSRF" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PasswordCodeRequest" }
+      responses:
+        "200":
+          description: New backup codes.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BackupCodes" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/Error" }
   /api/auth/logout:
     post:
       summary: Log out
@@ -744,11 +892,57 @@ components:
         password: { type: string }
     User:
       type: object
-      required: [username, role, must_change_password]
+      required: [username, role, must_change_password, totp_enabled]
       properties:
         username: { type: string }
         role: { type: string, enum: [admin, viewer] }
         must_change_password: { type: boolean }
+        totp_enabled: { type: boolean }
+    MfaRequired:
+      type: object
+      required: [mfa_required, mfa_token]
+      properties:
+        mfa_required: { type: boolean, enum: [true] }
+        mfa_token: { type: string, description: "256-bit URL-safe token; valid 5 minutes, single use, 5 wrong codes" }
+    Login2FARequest:
+      type: object
+      required: [mfa_token, code]
+      properties:
+        mfa_token: { type: string }
+        code: { type: string, description: "6-digit authenticator code or a backup code (XXXXX-XXXXX)" }
+    PasswordRequest:
+      type: object
+      required: [current_password]
+      properties:
+        current_password: { type: string }
+    CodeRequest:
+      type: object
+      required: [code]
+      properties:
+        code: { type: string }
+    PasswordCodeRequest:
+      type: object
+      required: [current_password, code]
+      properties:
+        current_password: { type: string }
+        code: { type: string, description: "Authenticator code or unused backup code" }
+    TwoFactorStatus:
+      type: object
+      required: [enabled, backup_codes_remaining]
+      properties:
+        enabled: { type: boolean }
+        backup_codes_remaining: { type: integer }
+    TwoFactorSetup:
+      type: object
+      required: [secret, otpauth_uri]
+      properties:
+        secret: { type: string, description: "Base32 secret, shown once" }
+        otpauth_uri: { type: string }
+    BackupCodes:
+      type: object
+      required: [backup_codes]
+      properties:
+        backup_codes: { type: array, items: { type: string }, description: "Ten codes, shown once" }
     LoginResponse:
       type: object
       required: [user, csrf_token]
@@ -757,11 +951,12 @@ components:
         csrf_token: { type: string }
     Me:
       type: object
-      required: [username, role, must_change_password, csrf_token]
+      required: [username, role, must_change_password, totp_enabled, csrf_token]
       properties:
         username: { type: string }
         role: { type: string, enum: [admin, viewer] }
         must_change_password: { type: boolean }
+        totp_enabled: { type: boolean }
         csrf_token: { type: string }
     ChangePasswordRequest:
       type: object

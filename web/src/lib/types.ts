@@ -42,12 +42,31 @@ export interface Me {
   username: string
   role: Role
   must_change_password: boolean
+  totp_enabled: boolean
   csrf_token: string
 }
 
-export interface LoginResponse {
-  user: { username: string; role: Role; must_change_password: boolean }
+export interface SessionView {
+  user: { username: string; role: Role; must_change_password: boolean; totp_enabled?: boolean }
   csrf_token: string
+}
+
+/** The password was right but the account has two-factor on: a code is still needed. */
+export interface MfaRequired {
+  mfa_required: true
+  mfa_token: string
+}
+
+export type LoginResponse = SessionView | MfaRequired
+
+export interface TwoFactorStatus {
+  enabled: boolean
+  backup_codes_remaining: number
+}
+
+export interface TwoFactorSetup {
+  secret: string
+  otpauth_uri: string
 }
 
 export type ErrorCode =

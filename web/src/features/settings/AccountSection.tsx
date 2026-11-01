@@ -7,6 +7,7 @@ import { FieldError, Input, Label } from '@/components/ui/field'
 import { passwordProblem, serverMessage } from '@/features/auth/ChangePasswordPage'
 import { useAuth } from '@/features/auth/auth-context'
 import { MIN_PASSWORD } from '@/lib/validation'
+import { TwoFactorSection } from './TwoFactorSection'
 
 function PasswordForm() {
   const { changePassword } = useAuth()
@@ -114,6 +115,7 @@ export function AccountSection() {
         </div>
       </dl>
       <PasswordForm />
+      <TwoFactorSection />
       <Button variant="outline" className="h-11 w-fit px-5" onClick={() => void logout()}>
         <LogOut aria-hidden="true" />
         Sign out

@@ -282,3 +282,69 @@ describe('session races', () => {
     await waitFor(() => expect(getCsrfToken()).toBe('csrf-B'))
   })
 })
+
+describe('AuthProvider two-factor login', () => {
+  const setup = () => {
+    let loggedIn = false
+    routes['GET /api/auth/me'] = () => (loggedIn ? res(200, ME) : res(401, { error: 'no' }))
+    routes['POST /api/auth/login'] = () => res(200, { mfa_required: true, mfa_token: 'tok' })
+    routes['POST /api/auth/login/2fa'] = () => {
+      loggedIn = true
+      return res(200, {
+        user: { username: 'tomer', role: 'admin', must_change_password: false },
+        csrf_token: 'csrf-A',
+      })
+    }
+  }
+  const toStep2 = async () => {
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Sign in' })
+    type('Username', 'tomer')
+    type('Password', 'pw')
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
+    await screen.findByRole('heading', { name: 'Two-factor authentication' })
+  }
+
+  it('auto-submits at 6 digits and signs in; token is not signed in before', async () => {
+    setup()
+    await toStep2()
+    const input = screen.getByLabelText('Authentication code')
+    expect(input.getAttribute('autocomplete')).toBe('one-time-code')
+    expect(getCsrfToken()).toBeNull()
+    fireEvent.change(input, { target: { value: '12345' } })
+    expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith('/login/2fa'))).toBe(false)
+    fireEvent.change(input, { target: { value: '123456' } })
+    await waitFor(() => expect(screen.getByTestId('who').textContent).toBe('tomer'))
+    const call = fetchMock.mock.calls.find(([u]) => String(u).endsWith('/login/2fa'))!
+    expect(JSON.parse(call[1].body)).toEqual({ mfa_token: 'tok', code: '123456' })
+    expect(getCsrfToken()).toBe('csrf-A')
+  })
+
+  it('shows errors, handles 429 and the backup toggle', async () => {
+    setup()
+    await toStep2()
+    routes['POST /api/auth/login/2fa'] = () => res(401, { error: 'invalid code' })
+    fireEvent.change(screen.getByLabelText('Authentication code'), { target: { value: '000000' } })
+    expect((await screen.findByRole('alert')).textContent).toBe('Invalid code')
+    routes['POST /api/auth/login/2fa'] = () => res(429, { error: 'slow' }, { 'Retry-After': '9' })
+    fireEvent.change(screen.getByLabelText('Authentication code'), { target: { value: '000000' } })
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('9s'))
+    fireEvent.click(screen.getByRole('button', { name: 'Use a backup code' }))
+    expect(screen.getByLabelText('Backup code')).toBeTruthy()
+  })
+
+  it('returns to the password step when the pending login expired, and on Back', async () => {
+    setup()
+    await toStep2()
+    routes['POST /api/auth/login/2fa'] = () => res(401, { error: 'sign-in expired' })
+    fireEvent.change(screen.getByLabelText('Authentication code'), { target: { value: '000000' } })
+    expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeTruthy()
+    expect(screen.getByRole('alert').textContent).toContain('expired')
+
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'pw' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
+    await screen.findByRole('heading', { name: 'Two-factor authentication' })
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }))
+    expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeTruthy()
+  })
+})

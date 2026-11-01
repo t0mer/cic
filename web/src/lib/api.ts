@@ -9,6 +9,9 @@ import type {
   GeocodeUsage,
   ErrorCode,
   LoginResponse,
+  SessionView,
+  TwoFactorSetup,
+  TwoFactorStatus,
   Me,
   Place,
   PlaceInput,
@@ -168,12 +171,49 @@ export const login = (username: string, password: string) =>
     skipAuthHandler: true,
   })
 
+/** Second login step. `code` is a 6-digit TOTP code or a backup code. */
+export const loginTwoFactor = (mfa_token: string, code: string) =>
+  request<SessionView>('/api/auth/login/2fa', {
+    method: 'POST',
+    body: { mfa_token, code },
+    skipAuthHandler: true,
+  })
+
+// Two-factor management. A wrong password/code answers 401, which must not log the user out.
+export const twoFactorKey = ['twofactor'] as const
+export const fetchTwoFactor = () =>
+  request<TwoFactorStatus>('/api/auth/2fa', { skipAuthHandler: true })
+export const setupTwoFactor = (current_password: string) =>
+  request<TwoFactorSetup>('/api/auth/2fa/setup', {
+    method: 'POST',
+    body: { current_password },
+    skipAuthHandler: true,
+  })
+export const enableTwoFactor = (code: string) =>
+  request<{ backup_codes: string[] }>('/api/auth/2fa/enable', {
+    method: 'POST',
+    body: { code },
+    skipAuthHandler: true,
+  })
+export const disableTwoFactor = (current_password: string, code: string) =>
+  request<void>('/api/auth/2fa/disable', {
+    method: 'POST',
+    body: { current_password, code },
+    skipAuthHandler: true,
+  })
+export const regenerateBackupCodes = (current_password: string, code: string) =>
+  request<{ backup_codes: string[] }>('/api/auth/2fa/backup-codes', {
+    method: 'POST',
+    body: { current_password, code },
+    skipAuthHandler: true,
+  })
+
 export const logout = () =>
   request<void>('/api/auth/logout', { method: 'POST', skipAuthHandler: true })
 
 /** The server rotates the session: the response carries the NEW CSRF token, used from here on. */
 export async function changePassword(current_password: string, new_password: string) {
-  const res = await request<LoginResponse | undefined>('/api/auth/change-password', {
+  const res = await request<SessionView | undefined>('/api/auth/change-password', {
     method: 'POST',
     body: { current_password, new_password },
     skipAuthHandler: true,

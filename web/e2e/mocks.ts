@@ -176,6 +176,8 @@ export interface MockState {
   loginMustChange: boolean
   /** Next login answers 429 with this Retry-After when set. */
   loginRateLimitSeconds: number | null
+  /** Fake two-factor: any '123456' is a valid TOTP code; backup codes are single use. */
+  twoFactor: { enabled: boolean; pending: boolean; backupCodes: string[] }
   csrf: string
   requests: Recorded[]
   /** Override the response for command POSTs. */
@@ -183,6 +185,13 @@ export interface MockState {
 }
 
 export const PASSWORD = 'correct-password-123'
+export const TOTP_CODE = '123456'
+export const TOTP_SECRET = 'JBSWY3DPEHPK3PXP'
+export const BACKUP_CODE = 'ABCDE-FGH23'
+const freshBackupCodes = () => [
+  BACKUP_CODE,
+  ...Array.from({ length: 9 }, (_, i) => `CODE${i}-ZZ99${i}`),
+]
 
 export const activityPages = [
   {
@@ -241,6 +250,7 @@ export async function mockApi(
     loginRole: init.loginRole ?? 'admin',
     loginMustChange: init.loginMustChange ?? false,
     loginRateLimitSeconds: null,
+    twoFactor: { enabled: false, pending: false, backupCodes: [] },
     csrf: 'csrf-token-1',
     requests: [],
     commandError: null,
@@ -286,6 +296,27 @@ export async function mockApi(
     const path = url.pathname
     const method = req.method()
     const unauth = () => r.fulfill({ status: 401, json: { error: 'unauthorized' } })
+    const badCsrf = () => r.fulfill({ status: 403, json: { error: 'invalid csrf token' } })
+    const startSession = (username = 'tomer') => {
+      state.user = {
+        username,
+        role: state.loginRole,
+        must_change_password: state.loginMustChange,
+      }
+      return r.fulfill({
+        json: {
+          user: { ...state.user, totp_enabled: state.twoFactor.enabled },
+          csrf_token: state.csrf,
+        },
+      })
+    }
+    const useTwoFactorCode = (code?: string) => {
+      if (code === TOTP_CODE) return true
+      const i = state.twoFactor.backupCodes.indexOf(code ?? '')
+      if (i < 0) return false
+      state.twoFactor.backupCodes.splice(i, 1) // single use
+      return true
+    }
     let body: unknown = undefined
     try {
       body = req.postDataJSON()
@@ -311,19 +342,67 @@ export async function mockApi(
       const b = body as { username?: string; password?: string } | undefined
       if (b?.password !== PASSWORD)
         return r.fulfill({ status: 401, json: { error: 'invalid credentials' } })
-      state.user = {
-        username: b.username ?? 'tomer',
-        role: state.loginRole,
-        must_change_password: state.loginMustChange,
-      }
-      return r.fulfill({ json: { user: state.user, csrf_token: state.csrf } })
+      if (state.twoFactor.enabled)
+        return r.fulfill({ json: { mfa_required: true, mfa_token: 'mfa-token-1' } })
+      return startSession(b.username)
+    }
+    if (path === '/api/auth/login/2fa') {
+      const b = body as { mfa_token?: string; code?: string } | undefined
+      if (b?.mfa_token !== 'mfa-token-1')
+        return r.fulfill({ status: 401, json: { error: 'sign-in expired, start over' } })
+      if (useTwoFactorCode(b.code)) return startSession('tomer')
+      return r.fulfill({ status: 401, json: { error: 'invalid code' } })
     }
     if (path === '/api/auth/me')
-      return state.user ? r.fulfill({ json: { ...state.user, csrf_token: state.csrf } }) : unauth()
+      return state.user
+        ? r.fulfill({
+            json: { ...state.user, totp_enabled: state.twoFactor.enabled, csrf_token: state.csrf },
+          })
+        : unauth()
     if (!state.user) return unauth()
     if (path === '/api/auth/logout') {
       state.user = null
       return r.fulfill({ status: 204 })
+    }
+    if (path.startsWith('/api/auth/2fa')) {
+      const tf = state.twoFactor
+      const b = (body ?? {}) as { current_password?: string; code?: string }
+      const badPw = () => r.fulfill({ status: 401, json: { error: 'invalid password' } })
+      if (method === 'GET')
+        return r.fulfill({
+          json: { enabled: tf.enabled, backup_codes_remaining: tf.backupCodes.length },
+        })
+      if (req.headers()['x-csrf-token'] !== state.csrf) return badCsrf()
+      if (path === '/api/auth/2fa/setup') {
+        if (b.current_password !== PASSWORD) return badPw()
+        tf.pending = true
+        return r.fulfill({
+          json: {
+            secret: TOTP_SECRET,
+            otpauth_uri: `otpauth://totp/CIC:tomer?secret=${TOTP_SECRET}&issuer=CIC`,
+          },
+        })
+      }
+      if (path === '/api/auth/2fa/enable') {
+        if (!tf.pending || b.code !== TOTP_CODE)
+          return r.fulfill({ status: 401, json: { error: 'invalid code' } })
+        tf.enabled = true
+        tf.pending = false
+        tf.backupCodes = freshBackupCodes()
+        return r.fulfill({ json: { backup_codes: tf.backupCodes } })
+      }
+      if (b.current_password !== PASSWORD) return badPw()
+      if (!useTwoFactorCode(b.code))
+        return r.fulfill({ status: 401, json: { error: 'invalid code' } })
+      if (path === '/api/auth/2fa/disable') {
+        tf.enabled = false
+        tf.backupCodes = []
+        return r.fulfill({ status: 204 })
+      }
+      if (path === '/api/auth/2fa/backup-codes') {
+        tf.backupCodes = freshBackupCodes()
+        return r.fulfill({ json: { backup_codes: tf.backupCodes } })
+      }
     }
     if (path === '/api/auth/change-password') {
       state.user.must_change_password = false
@@ -333,7 +412,6 @@ export async function mockApi(
       return r.fulfill({ status: 403, json: { error: 'password change required' } })
     const isAdmin = state.user.role === 'admin'
     const forbidden = () => r.fulfill({ status: 403, json: { error: 'forbidden' } })
-    const badCsrf = () => r.fulfill({ status: 403, json: { error: 'invalid csrf token' } })
     if (path === '/api/devices') {
       const all = isAdmin && url.searchParams.get('include_hidden') === '1'
       const withPlace = (d: (typeof state.devices)[number]) => {
