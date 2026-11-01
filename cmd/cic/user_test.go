@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -130,4 +131,42 @@ func regexpLine(out string, fields ...string) bool {
 		}
 	}
 	return false
+}
+
+func TestUserDisable2FA(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "u.db")
+	ctx := context.Background()
+	if _, err := runUser(t, dbPath, scripted(), "a long enough password\n", "add", "alice", "--password-stdin"); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := auth.NewStore(db, nil)
+	k := bytes.Repeat([]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18}, 2)[:32]
+	st.SetSecretKey(k)
+	u, _, _ := st.UserByName(ctx, "alice")
+	sec, _ := auth.GenerateSecret()
+	if err := st.SetPendingTOTP(ctx, u.ID, sec); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := auth.Code(sec, auth.TOTPStep(time.Now()))
+	if _, err := st.EnableTOTP(ctx, u.ID, c, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	out, err := runUser(t, dbPath, scripted(), "", "disable-2fa", "alice")
+	if err != nil || !strings.Contains(out, "disabled for alice") {
+		t.Fatalf("%v %q", err, out)
+	}
+	db, _ = store.Open(ctx, dbPath)
+	defer db.Close()
+	if en, rem, _ := auth.NewStore(db, nil).TOTPState(ctx, u.ID); en || rem != 0 {
+		t.Fatal("2fa still on")
+	}
+	if _, err := runUser(t, dbPath, scripted(), "", "disable-2fa", "nobody"); err == nil {
+		t.Fatal("unknown user accepted")
+	}
 }

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -28,6 +29,7 @@ import (
 	"github.com/t0mer/cic/internal/geocode"
 	"github.com/t0mer/cic/internal/mqtt"
 	"github.com/t0mer/cic/internal/places"
+	"github.com/t0mer/cic/internal/secret"
 	"github.com/t0mer/cic/internal/store"
 	"github.com/t0mer/cic/internal/version"
 	"github.com/t0mer/cic/internal/webui"
@@ -122,8 +124,19 @@ func runServe(parent context.Context, cfg *config.Config) error {
 		log.Warn("session cookies are not marked Secure (--insecure-cookies); use only for plain-HTTP development")
 	}
 	warnProxyConfig(log, cfg.Server.BaseURL, proxies)
+	secretKey, created, err := secret.LoadOrCreateKey(os.Getenv(secret.KeyEnv),
+		filepath.Join(filepath.Dir(cfg.Storage.Path), "secret.key"), log)
+	if err != nil {
+		return fmt.Errorf("loading secret key: %w", err)
+	}
+	if created {
+		log.Info("generated a new secret key file for encrypting two-factor secrets; back it up with the database", "path", filepath.Join(filepath.Dir(cfg.Storage.Path), "secret.key"))
+	}
 	authSvc := auth.NewService(auth.Config{DB: db, Log: log, InsecureCookies: cfg.Server.InsecureCookies,
-		TrustedProxies: proxies, BaseURL: cfg.Server.BaseURL})
+		TrustedProxies: proxies, BaseURL: cfg.Server.BaseURL, SecretKey: secretKey})
+	if err := authSvc.Store().CheckTOTPKey(ctx); err != nil {
+		log.Error("two-factor secrets cannot be decrypted; two-factor logins will fail until the original secret key is restored", "err", err)
+	}
 	if err := auth.Bootstrap(ctx, authSvc.Store(), log, os.Getenv); err != nil {
 		return err
 	}
@@ -134,6 +147,10 @@ func runServe(parent context.Context, cfg *config.Config) error {
 	} else if n > 0 {
 		log.Warn("audit rows left pending by a previous run marked unknown", "rows", n)
 	}
+	authSvc.SetAuditor(func(ctx context.Context, actor, action, detail string) error {
+		_, err := auditLog.Begin(ctx, audit.Entry{User: actor, Device: "-", Action: action, Status: "ok", Detail: detail})
+		return err
+	})
 	go auditLog.RunJanitor(ctx, cfg.Audit.Retention, auditPurgeEvery, log)
 	relay := newOutcomeRelay(hub, auditLog, log)
 	defer relay.Close() // runs before db.Close

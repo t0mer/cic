@@ -187,7 +187,24 @@ func newUserCmdWith(d userDeps) *cobra.Command {
 		}
 	}
 
-	user.AddCommand(add, reset, list,
+	disable2fa := &cobra.Command{
+		Use:   "disable-2fa <username>",
+		Short: "Turn off two-factor login for a user and delete their backup codes (lockout rescue)",
+		Args:  cobra.ExactArgs(1),
+		RunE: with(func(cmd *cobra.Command, st *auth.Store, args []string) error {
+			u, _, err := st.UserByName(cmd.Context(), args[0])
+			if err != nil {
+				return fmt.Errorf("user %q: %w", args[0], err)
+			}
+			if err := st.DisableTOTP(cmd.Context(), u.ID); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "two-factor authentication disabled for %s\n", u.Username)
+			return nil
+		}),
+	}
+
+	user.AddCommand(add, reset, list, disable2fa,
 		setDisabled("disable", "Disable a user and end their sessions", true),
 		setDisabled("enable", "Re-enable a user", false))
 	return user

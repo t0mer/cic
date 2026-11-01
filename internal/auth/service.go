@@ -37,6 +37,7 @@ type Config struct {
 	TrustedProxies  []*net.IPNet // peers allowed to set X-Forwarded-For / X-Forwarded-Proto
 	BaseURL         string       // public URL; its scheme is the expected scheme of Origin headers
 	Now             func() time.Time
+	SecretKey       []byte // 32-byte key for TOTP secrets; nil disables two-factor setup
 }
 
 // Service ties the store, rate limiter and HTTP handlers together.
@@ -50,6 +51,8 @@ type Service struct {
 	now      func() time.Time
 	hashSem  chan struct{} // bounds concurrent argon2 work (64 MiB each); the shared hashPool
 	hashWait time.Duration // longest a request queues for a hash slot before 503
+	mfa      *mfaStore     // pending second-factor challenges
+	audit    func(ctx context.Context, actor, action, detail string) error
 }
 
 // NewService builds a Service.
@@ -62,7 +65,9 @@ func NewService(c Config) *Service {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Service{store: NewStore(c.DB, now), limiter: NewLimiter(now), log: log,
+	st := NewStore(c.DB, now)
+	st.SetSecretKey(c.SecretKey)
+	return &Service{store: st, limiter: NewLimiter(now), log: log, mfa: newMFAStore(now),
 		insecure: c.InsecureCookies, trusted: c.TrustedProxies, now: now, hashSem: hashPool,
 		hashWait: hashQueueWait,
 		httpsURL: strings.HasPrefix(strings.ToLower(strings.TrimSpace(c.BaseURL)), "https://")}
@@ -86,6 +91,22 @@ func (s *Service) WatchSession(sess Session) (ended <-chan struct{}, stop func()
 	return s.store.Watch(sess.UserID, sess.IDHash)
 }
 
+// SetAuditor registers the function that records security events of this package
+// (two-factor changes and backup-code logins) in the audit log. Errors are logged, never
+// returned to the caller. Call it before serving.
+func (s *Service) SetAuditor(f func(ctx context.Context, actor, action, detail string) error) {
+	s.audit = f
+}
+
+func (s *Service) auditEvent(ctx context.Context, actor, action, detail string) {
+	if s.audit == nil {
+		return
+	}
+	if err := s.audit(context.WithoutCancel(ctx), actor, action, detail); err != nil {
+		s.log.Error("audit write failed", "action", action, "err", err)
+	}
+}
+
 // Limiter returns the login rate limiter.
 func (s *Service) Limiter() *Limiter { return s.limiter }
 
@@ -102,6 +123,7 @@ func (s *Service) RunJanitor(ctx context.Context, every time.Duration) {
 				s.log.Error("purging expired sessions", "err", err)
 			}
 			s.limiter.Prune()
+			s.mfa.prune()
 		}
 	}
 }
@@ -278,11 +300,20 @@ func RequireRole(role Role) func(http.Handler) http.Handler {
 func (s *Service) Routes() http.Handler {
 	r := chi.NewRouter()
 	r.Post("/login", s.login)
+	r.Post("/login/2fa", s.login2FA)
 	r.Group(func(r chi.Router) {
 		r.Use(s.RequireAuthAllowPasswordChange)
 		r.Post("/logout", s.logout)
 		r.Get("/me", s.me)
 		r.Post("/change-password", s.changePassword)
+	})
+	r.Group(func(r chi.Router) {
+		r.Use(s.RequireAuth)
+		r.Get("/2fa", s.twoFAStatus)
+		r.Post("/2fa/setup", s.twoFASetup)
+		r.Post("/2fa/enable", s.twoFAEnable)
+		r.Post("/2fa/disable", s.twoFADisable)
+		r.Post("/2fa/backup-codes", s.twoFABackupCodes)
 	})
 	r.NotFound(func(w http.ResponseWriter, _ *http.Request) { writeError(w, http.StatusNotFound, "not found") })
 	r.MethodNotAllowed(func(w http.ResponseWriter, _ *http.Request) {
@@ -295,10 +326,11 @@ type userView struct {
 	Username           string `json:"username"`
 	Role               Role   `json:"role"`
 	MustChangePassword bool   `json:"must_change_password"`
+	TOTPEnabled        bool   `json:"totp_enabled"`
 }
 
 func viewOf(u User) userView {
-	return userView{Username: u.Username, Role: u.Role, MustChangePassword: u.MustChangePassword}
+	return userView{Username: u.Username, Role: u.Role, MustChangePassword: u.MustChangePassword, TOTPEnabled: u.TOTPEnabled}
 }
 
 type sessionView struct {
@@ -405,14 +437,41 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
-	// Only the account's own counter is cleared: the source address keeps its failures, so
-	// logging in to one's own account cannot launder guesses against others.
-	att.Success(userKey)
 	if newHash != "" {
 		if err := s.store.replaceHash(r.Context(), u.ID, hash, newHash); err != nil {
 			s.log.Warn("upgrading password hash", "err", err)
 		}
 	}
+	if u.TOTPEnabled {
+		// Password right, second factor still owed: no session yet. The attempt is
+		// refunded WITHOUT clearing any failure count (Cancel, not Success): the password
+		// failure counters only reset once the second factor passes, so a stream of
+		// correct-password / never-finishes logins cannot be used to launder failures, and
+		// the real guessing (the second factor) is limited on the same user:/ip: keys.
+		att.Cancel()
+		token, err := s.mfa.issue(u.ID)
+		if errors.Is(err, errMFAFull) {
+			w.Header().Set("Retry-After", "30")
+			writeError(w, http.StatusServiceUnavailable, "too many sign-ins in progress, try again shortly")
+			return
+		}
+		if err != nil {
+			s.log.Error("creating mfa challenge", "err", err)
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"mfa_required": true, "mfa_token": token})
+		return
+	}
+	// Only the account's own counter is cleared: the source address keeps its failures, so
+	// logging in to one's own account cannot launder guesses against others.
+	att.Success(userKey)
+	s.startSession(w, r, u)
+}
+
+// startSession replaces any pre-login session with a fresh one, records the login and
+// answers with the session view.
+func (s *Service) startSession(w http.ResponseWriter, r *http.Request, u User) {
 	if c, err := r.Cookie(s.CookieName()); err == nil {
 		_ = s.store.DeleteSession(r.Context(), c.Value) // never reuse a pre-login session
 	}

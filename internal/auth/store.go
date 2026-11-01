@@ -71,6 +71,7 @@ type User struct {
 	Disabled           bool
 	CreatedAt          time.Time
 	LastLogin          *time.Time
+	TOTPEnabled        bool // two-factor login is on
 }
 
 // Session is a server-side login session.
@@ -92,6 +93,9 @@ type Store struct {
 
 	wmu      sync.Mutex
 	watchers map[*watcher]struct{}
+	key      []byte // encrypts TOTP secrets; nil disables the TOTP methods
+
+	afterEnableRead func() // test seam: runs in EnableTOTP between the read and the write
 }
 
 // watcher is one open event stream bound to a session.
@@ -154,21 +158,22 @@ func b2i(b bool) int {
 	return 0
 }
 
-const userCols = `id, username, role, must_change_password, disabled, created_at, last_login`
+const userCols = `id, username, role, must_change_password, disabled, created_at, last_login, totp_enabled`
 
 type scanner interface{ Scan(...any) error }
 
 func scanUser(sc scanner, extra ...any) (User, error) {
 	var u User
 	var role string
-	var must, dis int
+	var must, dis, totp int
 	var created int64
 	var last sql.NullInt64
-	dest := append([]any{&u.ID, &u.Username, &role, &must, &dis, &created, &last}, extra...)
+	dest := append([]any{&u.ID, &u.Username, &role, &must, &dis, &created, &last, &totp}, extra...)
 	if err := sc.Scan(dest...); err != nil {
 		return User{}, err
 	}
 	u.Role, u.MustChangePassword, u.Disabled = Role(role), must != 0, dis != 0
+	u.TOTPEnabled = totp != 0
 	u.CreatedAt = time.Unix(created, 0).UTC()
 	if last.Valid {
 		t := time.Unix(last.Int64, 0).UTC()
@@ -399,7 +404,7 @@ func (s *Store) lookup(ctx context.Context, token string, touch bool) (Session, 
 	}
 	var sess Session
 	var created, seen int64
-	row := s.db.QueryRowContext(ctx, `SELECT u.id, u.username, u.role, u.must_change_password, u.disabled, u.created_at, u.last_login,
+	row := s.db.QueryRowContext(ctx, `SELECT u.id, u.username, u.role, u.must_change_password, u.disabled, u.created_at, u.last_login, u.totp_enabled,
 		s.id_hash, s.csrf_token, s.created_at, s.last_seen, s.user_agent
 		FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id_hash = ?`, hashToken(token))
 	u, err := scanUser(row, &sess.IDHash, &sess.CSRFToken, &created, &seen, &sess.UserAgent)
@@ -614,4 +619,34 @@ func (s *Store) UpdateUser(ctx context.Context, id int64, role *Role, disabled *
 		}
 	}
 	return User{}, errors.New("updating user: changed concurrently, try again")
+}
+
+// DeleteOtherSessions removes every session of the user except the one identified by
+// keepIDHash, and ends the event streams bound to the removed ones.
+func (s *Store) DeleteOtherSessions(ctx context.Context, userID int64, keepIDHash string) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT id_hash FROM sessions WHERE user_id = ? AND id_hash <> ?`, userID, keepIDHash)
+	if err != nil {
+		return fmt.Errorf("listing sessions: %w", err)
+	}
+	var gone []string
+	for rows.Next() {
+		var h string
+		if err := rows.Scan(&h); err != nil {
+			rows.Close()
+			return err
+		}
+		gone = append(gone, h)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ? AND id_hash <> ?`, userID, keepIDHash); err != nil {
+		return fmt.Errorf("dropping sessions: %w", err)
+	}
+	for _, h := range gone {
+		s.endWatchers(userID, h)
+	}
+	return nil
 }
