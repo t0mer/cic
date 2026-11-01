@@ -30,6 +30,10 @@ export interface MapSelection {
 
 const ZERO: [number, number] = [0, 0]
 
+// Maps already torn down. On unmount the map effect's cleanup runs before the attribution
+// effect's, and maplibre throws when a control is removed from a removed map.
+const removedMaps = new WeakSet<GLMap>()
+
 export default function MapView({
   devices,
   styleUrl,
@@ -115,6 +119,7 @@ export default function MapView({
     setInitError(null)
     setMap(m)
     return () => {
+      removedMaps.add(m)
       m.remove()
       setMap(null)
     }
@@ -136,7 +141,7 @@ export default function MapView({
     })
     map.addControl(ctl, 'bottom-right')
     return () => {
-      map.removeControl(ctl)
+      if (!removedMaps.has(map)) map.removeControl(ctl)
     }
   }, [map, attribution, narrow])
 
