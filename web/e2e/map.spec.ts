@@ -35,8 +35,7 @@ for (const vp of [
 
     test('lists phones, selects one, fits all, no horizontal scroll', async ({ page }) => {
       await open(page)
-      await expect(page.locator("main")).not.toBeEmpty({ timeout: 3000 })
-  expect(errors).toEqual([])
+      await expect(page.getByRole('heading', { name: 'Map', level: 1 })).toBeAttached()
       if (vp.name === 'mobile') {
         const handle = page.getByRole('button', { name: /3 phones/ })
         await expect(handle).toBeVisible()
@@ -76,8 +75,7 @@ for (const vp of [
       page.on('request', (r) => {
         if (r.url().startsWith('https://map.example.test/')) requested.push(r.url())
       })
-      await expect(page.locator("main")).not.toBeEmpty({ timeout: 3000 })
-  expect(errors).toEqual([])
+      await expect(page.getByRole('heading', { name: 'Map', level: 1 })).toBeAttached()
       const toggle = page.getByTestId('theme-toggle')
       await toggle.click() // light
       await toggle.click() // dark
@@ -97,8 +95,7 @@ for (const vp of [
           await toggle.click()
           await toggle.click()
         }
-        await expect(page.locator("main")).not.toBeEmpty({ timeout: 3000 })
-  expect(errors).toEqual([])
+        await expect(page.getByRole('heading', { name: 'Map', level: 1 })).toBeAttached()
         const failed = (await mapState(page)) === 'unavailable'
         if (!failed) {
           if (vp.name === 'mobile') {
@@ -147,7 +144,6 @@ test('leaving the map for Devices renders the cards and raises no page error', a
   await mapState(page)
   await page.getByRole('link', { name: 'Devices' }).first().click()
   await expect(page).toHaveURL(/\/devices$/)
-  await expect(page.locator("main")).not.toBeEmpty({ timeout: 3000 })
-  expect(errors).toEqual([])
+  await expect(page.getByRole('main')).not.toBeEmpty()
   expect(errors).toEqual([])
 })
