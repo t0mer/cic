@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -54,6 +55,9 @@ type Recorder struct {
 	beforeInsert func()         // test seam, called under mu just before the insert
 	afterDeletes func()         // test seam, called by purge after each DELETE batch, under mu
 
+	gmu  sync.Mutex        // guards gens only; never held across I/O, so OnLocation stays non-blocking
+	gens map[string]uint64 // per-key incarnation, bumped by Forget; absent means 0
+
 	qmu       sync.Mutex
 	queue     []fix
 	queueSize int
@@ -69,6 +73,8 @@ type fix struct {
 	ts       int64
 	lat, lon float64
 	acc      *float64
+	gen      uint64 // the key's generation when the fix was queued
+	enq      int64  // enqueue time, unix seconds: a device created later is a new incarnation
 }
 
 const (
@@ -90,10 +96,10 @@ func New(db *sql.DB, cfg Config, log *slog.Logger) *Recorder {
 		cfg.Retention = DefaultRetention
 	}
 	r := &Recorder{db: db, cfg: cfg, now: time.Now, log: log,
-		warn: ratelog.Limiter{Interval: time.Minute}, last: map[string]point{}, inserts: map[string]int{},
+		warn: ratelog.Limiter{Interval: time.Minute}, last: map[string]point{}, gens: map[string]uint64{}, inserts: map[string]int{},
 		queueSize: DefaultQueueSize, wake: make(chan struct{}, 1), dropWarn: ratelog.Limiter{Interval: time.Minute},
 		backoff: []time.Duration{50 * time.Millisecond, 200 * time.Millisecond, 800 * time.Millisecond}}
-	r.write = func(ctx context.Context, f fix) error { return r.Record(ctx, f.key, f.ts, f.lat, f.lon, f.acc) }
+	r.write = r.record
 	return r
 }
 
@@ -102,6 +108,20 @@ func New(db *sql.DB, cfg Config, log *slog.Logger) *Recorder {
 // closer to it than MinDistanceM. Older fixes are thinned the same way against their nearest stored
 // neighbours. A fix for a device that no longer exists is dropped.
 func (r *Recorder) Record(ctx context.Context, key string, ts int64, lat, lon float64, accuracy *float64) error {
+	f := fix{key: key, ts: ts, lat: lat, lon: lon, acc: accuracy, gen: r.generation(key), enq: math.MaxInt64}
+	return r.record(ctx, f)
+}
+
+// generation returns the current incarnation counter of key.
+func (r *Recorder) generation(key string) uint64 {
+	r.gmu.Lock()
+	defer r.gmu.Unlock()
+	return r.gens[key]
+}
+
+// record is Record for a fix carrying the generation and enqueue time it was queued with.
+func (r *Recorder) record(ctx context.Context, f fix) error {
+	key, ts, lat, lon, accuracy := f.key, f.ts, f.lat, f.lon, f.acc
 	if key == "" || math.IsNaN(lat) || math.IsInf(lat, 0) || math.IsNaN(lon) || math.IsInf(lon, 0) ||
 		lat < -90 || lat > 90 || lon < -180 || lon > 180 {
 		return nil
@@ -117,6 +137,11 @@ func (r *Recorder) Record(ctx context.Context, key string, ts int64, lat, lon fl
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// Forget bumps the generation under mu, so a stale fix is rejected here and a fix that passes
+	// is inserted before any later Forget runs.
+	if r.generation(key) != f.gen {
+		return nil
+	}
 	last, ok := r.last[key]
 	if !ok {
 		var err error
@@ -149,10 +174,16 @@ func (r *Recorder) Record(ctx context.Context, key string, ts int64, lat, lon fl
 	if r.beforeInsert != nil {
 		r.beforeInsert()
 	}
-	// Conditional on the device still existing: a concurrent Registry.Delete must not be
-	// followed by an orphan point.
+	// Conditional on the device still existing: a concurrent Registry.Delete must not be followed
+	// by an orphan point. created_at <= enq additionally rejects a fix queued before the device
+	// was deleted and recreated, in the window before Registry.Delete's OnRemove hook runs
+	// (second resolution; a device created by the very event that produced the fix passes).
+	// Known limits: a fix whose hook is delayed past a full delete and recreate, a same-second
+	// delete+recreate before the hook runs, and a wall clock stepping backwards can each cost or
+	// admit one point; they cannot be closed from inside this package.
 	res, err := r.db.ExecContext(ctx, `INSERT OR IGNORE INTO location_points(device_key, ts, lat, lon, accuracy)
-		SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM devices WHERE key = ?)`, key, ts, lat, lon, acc, key)
+		SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM devices WHERE key = ? AND created_at <= ?)`,
+		key, ts, lat, lon, acc, key, f.enq)
 	if err != nil {
 		return fmt.Errorf("recording location of %q: %w", key, err)
 	}
@@ -245,7 +276,7 @@ func (r *Recorder) loadLast(ctx context.Context, key string) (point, bool, error
 // (never blocks, never touches the database); RunWriter persists it. When the queue is full the
 // oldest queued fix is dropped.
 func (r *Recorder) OnLocation(key string, ts int64, lat, lon float64, accuracy *float64) {
-	f := fix{key: key, ts: ts, lat: lat, lon: lon}
+	f := fix{key: key, ts: ts, lat: lat, lon: lon, gen: r.generation(key), enq: r.now().Unix()}
 	if accuracy != nil {
 		a := *accuracy
 		f.acc = &a
@@ -364,12 +395,20 @@ func isBusy(err error) bool {
 	return strings.Contains(m, "SQLITE_BUSY") || strings.Contains(m, "database is locked") || strings.Contains(m, "SQLITE_LOCKED")
 }
 
-// Forget drops the cached last point of a device (its points were deleted elsewhere).
+// Forget starts a new incarnation of a device whose points were deleted elsewhere: it bumps the
+// key's generation (so a fix already taken by the writer is rejected), discards the key's queued
+// fixes and drops its cached last point.
 func (r *Recorder) Forget(key string) {
 	r.mu.Lock()
+	r.gmu.Lock()
+	r.gens[key]++
+	r.gmu.Unlock()
 	delete(r.last, key)
 	delete(r.inserts, key)
 	r.mu.Unlock()
+	r.qmu.Lock()
+	r.queue = slices.DeleteFunc(r.queue, func(f fix) bool { return f.key == key })
+	r.qmu.Unlock()
 }
 
 // Purge deletes points older than the configured retention, then the oldest points of every

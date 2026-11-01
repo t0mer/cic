@@ -437,3 +437,50 @@ func TestQueueStaysBoundedAfterRequeue(t *testing.T) {
 		t.Fatalf("queue = %v, want 3 entries ending in 6", got)
 	}
 }
+
+func TestForgetRemovesOnlyThatKeysQueuedFixes(t *testing.T) {
+	r, _ := newRec(t, cfg())
+	r.OnLocation(key, 100, 1, 1, nil)
+	r.OnLocation("dradis/other", 101, 1, 1, nil)
+	r.OnLocation(key, 102, 1, 1, nil)
+	r.Forget(key)
+	if got := queued(r); len(got) != 1 || got[0] != 101 {
+		t.Fatalf("queue after Forget: %v", got)
+	}
+}
+
+func TestFixInFlightDuringForgetIsRejected(t *testing.T) {
+	r, count := newRec(t, cfg())
+	ts := t0.Unix() - 60
+	r.OnLocation(key, ts, 32, 34, nil)
+	r.OnLocation("dradis/other", ts, 32, 34, nil)
+	forgotten := false
+	r.write = func(ctx context.Context, f fix) error {
+		if f.key == key && !forgotten {
+			forgotten = true
+			r.Forget(key) // the delete lands after the fix left the queue, before its insert
+		}
+		return r.record(ctx, f)
+	}
+	r.drain(context.Background())
+	if count() != 1 {
+		t.Fatalf("expected only the other device's fix, got %d rows", count())
+	}
+	r.OnLocation(key, ts+1, 32, 34, nil) // the new incarnation is recorded
+	r.drain(context.Background())
+	if count() != 2 {
+		t.Fatalf("new incarnation fix lost: %d rows", count())
+	}
+}
+
+func TestFixQueuedBeforeRecreateIsRejectedByCreatedAt(t *testing.T) {
+	r, count := newRec(t, cfg())
+	r.OnLocation(key, t0.Unix()-60, 32, 34, nil) // enqueued at t0, no Forget (hook not run yet)
+	if _, err := r.db.Exec(`UPDATE devices SET created_at = ? WHERE key = ?`, t0.Unix()+10, key); err != nil {
+		t.Fatal(err)
+	}
+	r.drain(context.Background())
+	if count() != 0 {
+		t.Fatalf("pre-recreate fix stored: %d rows", count())
+	}
+}
