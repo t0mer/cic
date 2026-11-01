@@ -7,6 +7,9 @@ import { makeDevice } from '@/lib/fixtures'
 
 const state = vi.hoisted(() => ({ current: {} as Record<string, unknown> }))
 vi.mock('./queries', () => ({ useDevices: () => state.current }))
+vi.mock('@/features/config/queries', () => ({
+  useUiConfig: () => ({ data: undefined }),
+}))
 
 import { DevicesPage } from './DevicesPage'
 

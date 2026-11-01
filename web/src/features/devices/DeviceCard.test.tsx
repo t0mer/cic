@@ -77,3 +77,29 @@ describe('DeviceCard', () => {
     expect(screen.queryByText('Offline')).toBeNull()
   })
 })
+
+describe('DeviceCard location name', () => {
+  it('shows the name with coordinates as the secondary line', () => {
+    render(<DeviceCard device={makeDevice({ location_name: 'Dizengoff St' })} now={NOW} />)
+    const n = screen.getByText('Dizengoff St')
+    expect(n.getAttribute('dir')).toBe('auto')
+    expect(n.getAttribute('title')).toBe('32.0853, 34.7818')
+    expect(screen.getByText('32.0853, 34.7818')).toBeTruthy()
+    expect(screen.getByRole('link', { name: /Google Maps/ })).toBeTruthy()
+  })
+
+  it('falls back to coordinates when the name is null', () => {
+    render(<DeviceCard device={makeDevice()} now={NOW} geocodeEnabled />)
+    expect(screen.getByText('32.0853, 34.7818')).toBeTruthy()
+    expect(screen.queryByTestId('location-skeleton')).toBeNull()
+  })
+
+  it('shows a skeleton for a brand-new unnamed fix when geocoding is on', () => {
+    const d = makeDevice({ location_time: NOW - 3 })
+    render(<DeviceCard device={d} now={NOW} geocodeEnabled />)
+    expect(screen.getByTestId('location-skeleton')).toBeTruthy()
+    cleanup()
+    render(<DeviceCard device={d} now={NOW} />)
+    expect(screen.queryByTestId('location-skeleton')).toBeNull()
+  })
+})

@@ -3,6 +3,7 @@ import { NavLink, Outlet } from 'react-router-dom'
 
 import { useTheme, type Theme } from '@/components/theme-provider'
 import { UserMenu } from '@/features/auth/UserMenu'
+import { RevealProvider } from '@/features/settings/reveal'
 import { useAuth } from '@/features/auth/auth-context'
 import { useBroker } from '@/features/devices/queries'
 import { useEventStream } from '@/features/devices/useEventStream'
@@ -118,75 +119,77 @@ function Notices() {
 
 export function AppShell() {
   return (
-    <div className="min-h-dvh">
-      <header className="sticky top-0 z-20 flex h-14 items-center gap-2 border-b bg-background px-3 md:ps-60">
-        <div className="flex items-center gap-2 md:hidden">
-          <LogoMark />
-          <span className="font-semibold">CIC</span>
-        </div>
-        <div className="ms-auto flex items-center">
-          <BrokerDot />
-          <ThemeToggle />
-          <UserMenu />
-        </div>
-      </header>
+    <RevealProvider>
+      <div className="min-h-dvh">
+        <header className="sticky top-0 z-20 flex h-14 items-center gap-2 border-b bg-background px-3 md:ps-60">
+          <div className="flex items-center gap-2 md:hidden">
+            <LogoMark />
+            <span className="font-semibold">CIC</span>
+          </div>
+          <div className="ms-auto flex items-center">
+            <BrokerDot />
+            <ThemeToggle />
+            <UserMenu />
+          </div>
+        </header>
 
-      <nav
-        aria-label="Primary"
-        data-testid="sidebar"
-        className="fixed inset-y-0 start-0 z-30 hidden w-56 flex-col gap-1 border-e bg-background p-3 md:flex"
-      >
-        <div className="mb-4 flex h-8 items-center gap-2 px-2">
-          <LogoMark />
-          <span className="font-semibold">CIC</span>
+        <nav
+          aria-label="Primary"
+          data-testid="sidebar"
+          className="fixed inset-y-0 start-0 z-30 hidden w-56 flex-col gap-1 border-e bg-background p-3 md:flex"
+        >
+          <div className="mb-4 flex h-8 items-center gap-2 px-2">
+            <LogoMark />
+            <span className="font-semibold">CIC</span>
+          </div>
+          {NAV.map(({ to, label, icon: Icon }) => (
+            <NavLink
+              key={to}
+              to={to}
+              className={({ isActive }) =>
+                cn(
+                  'flex h-11 items-center gap-3 rounded-md px-3 text-sm font-medium hover:bg-accent',
+                  isActive && 'bg-accent text-accent-foreground',
+                  focus,
+                )
+              }
+            >
+              <Icon className="size-5" aria-hidden="true" />
+              {label}
+            </NavLink>
+          ))}
+        </nav>
+
+        <nav
+          aria-label="Primary"
+          data-testid="tabbar"
+          className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-4 border-t bg-background pb-[env(safe-area-inset-bottom)] md:hidden"
+        >
+          {NAV.map(({ to, label, icon: Icon }) => (
+            <NavLink
+              key={to}
+              to={to}
+              className={({ isActive }) =>
+                cn(
+                  'flex h-14 flex-col items-center justify-center gap-0.5 text-xs font-medium',
+                  isActive ? 'text-foreground' : 'text-muted-foreground',
+                  focus,
+                )
+              }
+            >
+              <Icon className="size-5" aria-hidden="true" />
+              {label}
+            </NavLink>
+          ))}
+        </nav>
+
+        <div className="md:ps-56">
+          <Notices />
+          <main className="mx-auto max-w-[1600px] p-4 pb-24 md:p-6 md:pb-6">
+            <Outlet />
+          </main>
         </div>
-        {NAV.map(({ to, label, icon: Icon }) => (
-          <NavLink
-            key={to}
-            to={to}
-            className={({ isActive }) =>
-              cn(
-                'flex h-11 items-center gap-3 rounded-md px-3 text-sm font-medium hover:bg-accent',
-                isActive && 'bg-accent text-accent-foreground',
-                focus,
-              )
-            }
-          >
-            <Icon className="size-5" aria-hidden="true" />
-            {label}
-          </NavLink>
-        ))}
-      </nav>
-
-      <nav
-        aria-label="Primary"
-        data-testid="tabbar"
-        className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-4 border-t bg-background pb-[env(safe-area-inset-bottom)] md:hidden"
-      >
-        {NAV.map(({ to, label, icon: Icon }) => (
-          <NavLink
-            key={to}
-            to={to}
-            className={({ isActive }) =>
-              cn(
-                'flex h-14 flex-col items-center justify-center gap-0.5 text-xs font-medium',
-                isActive ? 'text-foreground' : 'text-muted-foreground',
-                focus,
-              )
-            }
-          >
-            <Icon className="size-5" aria-hidden="true" />
-            {label}
-          </NavLink>
-        ))}
-      </nav>
-
-      <div className="md:ps-56">
-        <Notices />
-        <main className="mx-auto max-w-[1600px] p-4 pb-24 md:p-6 md:pb-6">
-          <Outlet />
-        </main>
       </div>
-    </div>
+    </RevealProvider>
   )
 }

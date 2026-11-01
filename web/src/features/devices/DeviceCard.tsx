@@ -11,25 +11,12 @@ import {
 import { Card } from '@/components/ui/card'
 import { useAuth } from '@/features/auth/auth-context'
 import { DeviceActions } from '@/features/commands/DeviceActions'
-import { colorForKey, readableText } from '@/lib/color'
-import { firstGrapheme } from '@/lib/grapheme'
-import { formatCoords, googleMapsUrl } from '@/lib/maps'
+import { DeviceAvatar } from './DeviceAvatar'
+import { describeLocation } from '@/lib/location'
+import { googleMapsUrl } from '@/lib/maps'
 import { relativeTime } from '@/lib/time'
 import type { Device } from '@/lib/types'
 import { cn } from '@/lib/utils'
-
-function Avatar({ device }: { device: Device }) {
-  const bg = colorForKey(device.key, device.color)
-  return (
-    <div
-      aria-hidden="true"
-      className="flex size-12 shrink-0 items-center justify-center rounded-full text-xl font-semibold"
-      style={{ backgroundColor: bg, color: readableText(bg) }}
-    >
-      {firstGrapheme(device.full_name || device.device)}
-    </div>
-  )
-}
 
 function OnlineBadge({ online }: { online: boolean }) {
   return (
@@ -64,9 +51,18 @@ function Row({ icon, children }: { icon: React.ReactNode; children: React.ReactN
   )
 }
 
-function Location({ device, now }: { device: Device; now: number }) {
+function Location({
+  device,
+  now,
+  geocodeEnabled,
+}: {
+  device: Device
+  now: number
+  geocodeEnabled: boolean
+}) {
   const { latitude: lat, longitude: lng } = device
-  if (lat === null || lng === null) {
+  const view = describeLocation(device, geocodeEnabled, now)
+  if (view.kind === 'unknown' || lat === null || lng === null) {
     return (
       <Row icon={<MapPin />}>
         <span className="text-muted-foreground">Location unknown</span>
@@ -77,9 +73,28 @@ function Location({ device, now }: { device: Device; now: number }) {
     <Row icon={<MapPin />}>
       <div className="flex items-center justify-between gap-2">
         <div className="min-w-0">
-          <span dir="auto" className="break-words">
-            {formatCoords(lat, lng)}
-          </span>
+          {view.kind === 'named' ? (
+            <>
+              <span dir="auto" className="block break-words" title={view.coords}>
+                {view.name}
+              </span>
+              <span className="block text-xs text-muted-foreground">{view.coords}</span>
+            </>
+          ) : view.kind === 'pending' ? (
+            <>
+              <span
+                role="status"
+                aria-label="Looking up place name"
+                data-testid="location-skeleton"
+                className="my-1 block h-3.5 w-32 max-w-full animate-pulse rounded bg-accent"
+              />
+              <span className="block text-xs text-muted-foreground">{view.coords}</span>
+            </>
+          ) : (
+            <span dir="auto" className="break-words">
+              {view.coords}
+            </span>
+          )}
           {device.location_time ? (
             <span className="block text-xs text-muted-foreground">
               {relativeTime(device.location_time, now)}
@@ -175,7 +190,15 @@ function WifiStatus({ device }: { device: Device }) {
   )
 }
 
-export function DeviceCard({ device, now }: { device: Device; now: number }) {
+export function DeviceCard({
+  device,
+  now,
+  geocodeEnabled = false,
+}: {
+  device: Device
+  now: number
+  geocodeEnabled?: boolean
+}) {
   const { isAdmin } = useAuth()
   const name = device.full_name || device.device
   const seen =
@@ -183,7 +206,7 @@ export function DeviceCard({ device, now }: { device: Device; now: number }) {
   return (
     <Card className="gap-3 p-4" role="article" aria-label={name} data-testid="device-card">
       <div className="flex items-center gap-3">
-        <Avatar device={device} />
+        <DeviceAvatar deviceKey={device.key} name={name} color={device.color} />
         <div className="min-w-0 flex-1">
           <h2 dir="auto" className="truncate text-base leading-tight font-semibold" title={name}>
             {name}
@@ -193,7 +216,7 @@ export function DeviceCard({ device, now }: { device: Device; now: number }) {
         <OnlineBadge online={device.online} />
       </div>
       <div className="flex flex-col gap-1.5">
-        <Location device={device} now={now} />
+        <Location device={device} now={now} geocodeEnabled={geocodeEnabled} />
         <Battery device={device} />
         <WifiStatus device={device} />
       </div>

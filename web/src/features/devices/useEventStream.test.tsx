@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { toast } from 'sonner'
 import { clearResults, getResultForTest, registerIssued } from '@/features/commands/results'
-import { authKey, brokerKey, devicesKey } from '@/lib/api'
+import { allDevicesKey, authKey, brokerKey, devicesKey } from '@/lib/api'
 import { makeDevice } from '@/lib/fixtures'
 import type { Broker, Device } from '@/lib/types'
 import { useEventStream } from './useEventStream'
@@ -102,6 +102,22 @@ describe('useEventStream', () => {
     renderHook(() => useEventStream(true), { wrapper })
     act(() => last().emit('device.removed', { key: 'a/1' }))
     expect(devices()?.map((d) => d.key)).toEqual(['a/2'])
+  })
+
+  it('keeps the admin list (hidden included) in step with device.updated and device.removed', () => {
+    const a = makeDevice({ key: 'a/1' })
+    const b = makeDevice({ key: 'a/2' })
+    qc.setQueryData<Device[]>(devicesKey, [a, b])
+    qc.setQueryData<Device[]>(allDevicesKey, [a, b])
+    renderHook(() => useEventStream(true), { wrapper })
+    act(() => last().emit('device.updated', { ...b, hidden: true }))
+    expect(devices()?.map((d) => d.key)).toEqual(['a/1'])
+    expect(qc.getQueryData<Device[]>(allDevicesKey)?.map((d) => [d.key, d.hidden])).toEqual([
+      ['a/1', false],
+      ['a/2', true],
+    ])
+    act(() => last().emit('device.removed', { key: 'a/2' }))
+    expect(qc.getQueryData<Device[]>(allDevicesKey)?.map((d) => d.key)).toEqual(['a/1'])
   })
 
   it('ignores malformed payloads', () => {

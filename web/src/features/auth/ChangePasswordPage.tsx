@@ -4,10 +4,11 @@ import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { FieldError, Input, Label } from '@/components/ui/field'
 import { ApiError } from '@/lib/api'
+import { MIN_PASSWORD } from '@/lib/validation'
 import { AuthShell } from './AuthShell'
 import { useAuth } from './auth-context'
 
-export const MIN_PASSWORD = 12
+export { MIN_PASSWORD }
 
 /** Client-side check is UX only; the server enforces policy. */
 export function passwordProblem(next: string, confirm: string): string | null {
@@ -17,7 +18,7 @@ export function passwordProblem(next: string, confirm: string): string | null {
   return null
 }
 
-function serverMessage(err: unknown): string {
+export function serverMessage(err: unknown): string {
   if (err instanceof ApiError) {
     if (err.status === 401) return 'Current password is incorrect'
     if (err.status === 429)

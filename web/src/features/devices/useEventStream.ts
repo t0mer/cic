@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 
 import { isIssued, publishResult, toastFailure } from '@/features/commands/results'
 import { authKey, brokerKey, devicesKey } from '@/lib/api'
+import { applyDeviceRemoved, applyDeviceUpdate } from '@/lib/device-cache'
 import type { Broker, CommandResult, Device } from '@/lib/types'
 
 export type StreamStatus = 'connecting' | 'live' | 'reconnecting'
@@ -65,15 +66,7 @@ export function useEventStream(enabled: boolean, isAdmin = false): StreamStatus 
       es.addEventListener('device.updated', (e) => {
         const d = parse<Device>(e as MessageEvent)
         if (!d) return
-        qc.setQueryData<Device[]>(devicesKey, (old) => {
-          if (d.hidden) return old?.filter((x) => x.key !== d.key)
-          if (!old) return [d]
-          const i = old.findIndex((x) => x.key === d.key)
-          if (i < 0) return [...old, d]
-          const next = old.slice()
-          next[i] = d
-          return next
-        })
+        applyDeviceUpdate(qc, d)
       })
       es.addEventListener('command.result', (e) => {
         const r = parse<CommandResult>(e as MessageEvent)
@@ -85,7 +78,7 @@ export function useEventStream(enabled: boolean, isAdmin = false): StreamStatus 
       es.addEventListener('device.removed', (e) => {
         const r = parse<{ key: string }>(e as MessageEvent)
         if (!r) return
-        qc.setQueryData<Device[]>(devicesKey, (old) => old?.filter((x) => x.key !== r.key))
+        applyDeviceRemoved(qc, r.key)
       })
     }
 

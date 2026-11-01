@@ -4,6 +4,7 @@ import { useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
 import { Button } from '@/components/ui/button'
+import { useUiConfig } from '@/features/config/queries'
 import {
   filterDevices,
   SORT_KEYS,
@@ -41,6 +42,7 @@ export function DevicesPage() {
   const [params, setParams] = useSearchParams()
   const now = useNow()
   const { data, isPending, error, refetch, isFetching } = useDevices()
+  const geocodeEnabled = useUiConfig().data?.geocode_enabled ?? false
 
   const query = params.get('q') ?? ''
   const statusParam = params.get('status')
@@ -150,7 +152,7 @@ export function DevicesPage() {
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
           {shown.map((d) => (
-            <DeviceCard key={d.key} device={d} now={now} />
+            <DeviceCard key={d.key} device={d} now={now} geocodeEnabled={geocodeEnabled} />
           ))}
         </div>
       )}
