@@ -2,9 +2,10 @@ package geocode
 
 import (
 	"errors"
-	"math"
 	"sync"
 	"time"
+
+	"github.com/t0mer/cic/internal/geo"
 )
 
 // Why a lookup is not allowed right now.
@@ -112,10 +113,5 @@ func (g *Guard) BlockedUntil() *time.Time {
 
 // Haversine returns the great-circle distance in meters between a and b.
 func Haversine(a, b Point) float64 {
-	const earth = 6371000.0
-	rad := math.Pi / 180
-	dLat, dLon := (b.Lat-a.Lat)*rad, (b.Lon-a.Lon)*rad
-	h := math.Sin(dLat/2)*math.Sin(dLat/2) +
-		math.Cos(a.Lat*rad)*math.Cos(b.Lat*rad)*math.Sin(dLon/2)*math.Sin(dLon/2)
-	return 2 * earth * math.Asin(math.Min(1, math.Sqrt(h)))
+	return geo.Haversine(a.Lat, a.Lon, b.Lat, b.Lon)
 }

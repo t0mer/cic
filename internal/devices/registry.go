@@ -7,12 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/t0mer/cic/internal/geo"
 	"github.com/t0mer/cic/internal/mqtt"
 	"github.com/t0mer/cic/internal/ratelog"
 	"github.com/t0mer/cic/internal/store"
@@ -42,12 +42,21 @@ type Device struct {
 	LocationName   *string `json:"location_name"`
 	LocationNameAt *int64  `json:"location_name_at"` // unix seconds the name was resolved
 	// GeocodedLat/Lon are the coordinates LocationName was resolved for; internal bookkeeping.
-	GeocodedLat  *float64 `json:"-"`
-	GeocodedLon  *float64 `json:"-"`
-	DeviceInfo   *string  `json:"device_info"`
-	ScreenLocked *bool    `json:"screen_locked"`
-	LastSeen     int64    `json:"last_seen"`
-	CreatedAt    int64    `json:"created_at"`
+	GeocodedLat *float64 `json:"-"`
+	GeocodedLon *float64 `json:"-"`
+	// SafePlace is the safe place the last fix lies in; computed on read, never stored. Nil when
+	// the device is in none or has no location.
+	SafePlace    *SafePlaceRef `json:"safe_place"`
+	DeviceInfo   *string       `json:"device_info"`
+	ScreenLocked *bool         `json:"screen_locked"`
+	LastSeen     int64         `json:"last_seen"`
+	CreatedAt    int64         `json:"created_at"`
+}
+
+// SafePlaceRef names the safe place a device is currently in.
+type SafePlaceRef struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
 }
 
 // ErrDeviceLimit is returned by Apply when a new device would exceed the configured cap.
@@ -65,9 +74,11 @@ type Registry struct {
 	log          *slog.Logger
 	limitWarn    ratelog.Limiter
 
-	mu          sync.RWMutex
-	hooks       []func(Device)
-	removeHooks []func(Device)
+	mu           sync.RWMutex
+	hooks        []func(Device)
+	annotate     func(*Device)
+	removeHooks  []func(Device)
+	refreshHooks []func()
 }
 
 // NewRegistry returns a Registry; see Device.Online for the liveness rule.
@@ -79,6 +90,32 @@ func NewRegistry(db *sql.DB, offlineAfter time.Duration, log *slog.Logger) *Regi
 // SetMaxDevices caps the number of devices; 0 means unlimited. Call before use.
 func (r *Registry) SetMaxDevices(n int) {
 	r.maxDevices = n
+}
+
+// SetAnnotator sets a function applied to every device read from the store (list, get, notify),
+// used to attach computed fields such as SafePlace. Call before use.
+func (r *Registry) SetAnnotator(fn func(*Device)) {
+	r.mu.Lock()
+	r.annotate = fn
+	r.mu.Unlock()
+}
+
+// Renotify calls the OnRefresh hooks once, so listeners know computed fields (for example
+// SafePlace after a place was edited) changed on many devices without one event per device.
+func (r *Registry) Renotify() {
+	r.mu.RLock()
+	hooks := slices.Clone(r.refreshHooks)
+	r.mu.RUnlock()
+	for _, fn := range hooks {
+		fn()
+	}
+}
+
+// OnRefresh registers fn to be called by Renotify.
+func (r *Registry) OnRefresh(fn func()) {
+	r.mu.Lock()
+	r.refreshHooks = append(r.refreshHooks, fn)
+	r.mu.Unlock()
 }
 
 // OnChange registers fn to be called after every successful Apply.
@@ -202,16 +239,7 @@ func movedFarFromName(ctx context.Context, tx *sql.Tx, key string, lat, lon floa
 	if err != nil {
 		return false, fmt.Errorf("reading geocoded point of device %q: %w", key, err)
 	}
-	return haversine(gLat.Float64, gLon.Float64, lat, lon) > nameKeepMeters, nil
-}
-
-func haversine(lat1, lon1, lat2, lon2 float64) float64 {
-	const earth = 6371000.0
-	rad := math.Pi / 180
-	dLat, dLon := (lat2-lat1)*rad, (lon2-lon1)*rad
-	h := math.Sin(dLat/2)*math.Sin(dLat/2) +
-		math.Cos(lat1*rad)*math.Cos(lat2*rad)*math.Sin(dLon/2)*math.Sin(dLon/2)
-	return 2 * earth * math.Asin(math.Min(1, math.Sqrt(h)))
+	return geo.Haversine(gLat.Float64, gLon.Float64, lat, lon) > nameKeepMeters, nil
 }
 
 func staleLocation(ctx context.Context, tx *sql.Tx, key string, t int64) (bool, error) {
@@ -345,6 +373,12 @@ func (r *Registry) scan(s scanner) (Device, error) {
 	// most offline_after old. Retained messages never count as "seen" (see Apply).
 	age := r.now().Sub(time.Unix(d.LastSeen, 0))
 	d.Online = d.Status != nil && *d.Status && d.LastSeen > 0 && age <= r.offlineAfter
+	r.mu.RLock()
+	annotate := r.annotate
+	r.mu.RUnlock()
+	if annotate != nil {
+		annotate(&d)
+	}
 	return d, nil
 }
 
